@@ -1,0 +1,291 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"] // Add this
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis] // Add this
+}
+
+// --- Enums ---
+
+enum UserRole {
+  FIELD_TECH
+  SHELTER_STAFF
+  SHELTER_MANAGER
+  DOCTOR
+  NGO_ADMIN
+  GOVT_ADMIN
+  SUPER_ADMIN
+}
+
+enum OrganizationType {
+  NGO
+  GOVERNMENT
+}
+
+enum ProfileStatus {
+  TEMPORARY
+  REGISTERED
+}
+
+enum LifecycleState {
+  IN_TRANSIT
+  AWAITING_IDENTIFICATION
+  UNDER_OBSERVATION
+  EMERGENCY_MEDICAL
+  UNDER_MEDICAL_TREATMENT
+  POST_SURGERY_RECOVERY
+  MEDICAL_HOLD
+  ELIGIBLE_FOR_KENNEL
+  IN_KENNEL
+  TEMPORARILY_ISOLATED
+  READY_FOR_RELEASE
+  RELEASED
+  TRANSFERRED
+  DECEASED
+}
+
+enum LifecyclePhase {
+  INTAKE_IDENTIFICATION
+  MEDICAL_INTERVENTION
+  SHELTER_MANAGEMENT
+  FINAL_DISPOSITION
+}
+
+enum AnimalSex {
+  MALE
+  FEMALE
+  UNKNOWN
+}
+
+enum IntakeCondition {
+  HEALTHY
+  INJURED
+  RABIES_SUSPECTED
+  MALNOURISHED
+}
+
+enum PhotoType {
+  FACE
+  SIDE
+  MARKS
+  OTHER
+}
+
+enum BlockType {
+  INTAKE
+  MEDICAL
+  QUARANTINE
+  STANDARD
+  RECOVERY
+  ISOLATION
+}
+
+enum KennelStatus {
+  AVAILABLE
+  OCCUPIED
+  NEEDS_CLEANING
+  MAINTENANCE
+  RESERVED
+}
+
+// --- Models ---
+
+model Organization {
+  id           Int              @id @default(autoincrement())
+  name         String           @db.VarChar(255)
+  type         OrganizationType
+  contactEmail String           @map("contact_email") @db.VarChar(255)
+  contactPhone String           @map("contact_phone") @db.VarChar(20)
+  address      String           @db.Text
+  logoUrl      String?          @map("logo_url") @db.VarChar(500)
+  isActive     Boolean          @default(true) @map("is_active")
+  status       Int              @default(1)
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+
+  users    User[]
+  shelters Shelter[]
+
+  @@map("organizations")
+}
+
+model User {
+  id             Int           @id @default(autoincrement())
+  email          String        @unique @db.VarChar(255)
+  phone          String?       @unique @db.VarChar(20)
+  passwordHash   String        @map("password_hash") @db.VarChar(255)
+  name           String        @db.VarChar(100)
+  role           UserRole
+  organizationId Int?          @map("organization_id")
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  shelterId      Int?          @map("shelter_id")
+  shelter        Shelter?      @relation(fields: [shelterId], references: [id])
+  isActive       Boolean       @default(true) @map("is_active")
+  status         Int           @default(1)
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  dogsIntaken               Dog[]             @relation("UserIntake")
+  stateTransitionsPerformed StateTransition[] @relation("UserPerformedTransitions")
+  otps                      Otp[]
+
+  @@map("users")
+}
+
+model Shelter {
+  id             Int                                   @id @default(autoincrement())
+  organizationId Int                                   @map("organization_id")
+  organization   Organization                          @relation(fields: [organizationId], references: [id])
+  name           String                                @db.VarChar(255)
+  code           String                                @unique @db.VarChar(20)
+  address        String                                @db.Text
+  location       Unsupported("geography(Point, 4326)")
+  ward           String                                @db.VarChar(100)
+  totalCapacity  Int                                   @map("total_capacity")
+  contactPhone   String                                @map("contact_phone") @db.VarChar(20)
+  operatingHours Json                                  @map("operating_hours") @db.JsonB
+  isActive       Boolean                               @default(true) @map("is_active")
+  status         Int                                   @default(1)
+  createdAt      DateTime                              @default(now()) @map("created_at")
+  updatedAt      DateTime                              @updatedAt @map("updated_at")
+
+  users  User[]
+  dogs   Dog[]
+  blocks Block[]
+
+  @@map("shelters")
+}
+
+model Dog {
+  id                  Int                                   @id @default(autoincrement())
+  tempId              String                                @unique @map("temp_id") @db.VarChar(50)
+  rfidTag             String?                               @unique @map("rfid_tag") @db.VarChar(100)
+  shelterId           Int                                   @map("shelter_id")
+  shelter             Shelter                               @relation(fields: [shelterId], references: [id])
+  profileStatus       ProfileStatus                         @map("profile_status")
+  lifecycleState      LifecycleState                        @map("lifecycle_state")
+  lifecyclePhase      LifecyclePhase                        @map("lifecycle_phase")
+  estimatedAge        String?                               @map("estimated_age") @db.VarChar(50)
+  sex                 AnimalSex
+  breed               String?                               @default("Mixed") @db.VarChar(100)
+  color               String?                               @db.VarChar(100)
+  distinguishingMarks String?                               @map("distinguishing_marks") @db.Text
+  intakeCondition     IntakeCondition                       @map("intake_condition")
+  behavioralNotes     String?                               @map("behavioral_notes") @db.Text
+  rescueLocation      Unsupported("geography(Point, 4326)") @map("rescue_location")
+  rescueAddress       String?                               @map("rescue_address") @db.Text
+  intakeDate          DateTime                              @default(now()) @map("intake_date")
+  intakeByUserId      Int                                   @map("intake_by")
+  intakeBy            User                                  @relation("UserIntake", fields: [intakeByUserId], references: [id])
+  isSterilized        Boolean                               @default(false) @map("is_sterilized")
+  status              Int                                   @default(1)
+  createdAt           DateTime                              @default(now()) @map("created_at")
+  updatedAt           DateTime                              @updatedAt @map("updated_at")
+
+  // Kennel Relation
+  kennelId Int?    @map("kennel_id")
+  kennel   Kennel? @relation(fields: [kennelId], references: [id])
+
+  photos           DogPhoto[]
+  stateTransitions StateTransition[] @relation("DogHistory")
+
+  qrCode       String?   @unique @map("qr_code") @db.VarChar(128) // the token
+  qrAssignedAt DateTime? @map("qr_assigned_at")
+
+  @@map("dogs")
+}
+
+model DogPhoto {
+  id         Int       @id @default(autoincrement())
+  dogId      Int       @map("dog_id")
+  dog        Dog       @relation(fields: [dogId], references: [id], onDelete: Cascade)
+  photoUrl   String    @map("photo_url") @db.VarChar(500)
+  photoType  PhotoType @map("photo_type")
+  isPrimary  Boolean   @default(false) @map("is_primary")
+  capturedAt DateTime  @default(now()) @map("captured_at")
+
+  @@map("dog_photos")
+}
+
+model StateTransition {
+  id               Int            @id @default(autoincrement())
+  dogId            Int            @map("dog_id")
+  dog              Dog            @relation("DogHistory", fields: [dogId], references: [id])
+  fromState        LifecycleState @map("from_state")
+  toState          LifecycleState @map("to_state")
+  reason           String?        @db.Text
+  transitionedById Int            @map("transitioned_by")
+  transitionedBy   User           @relation("UserPerformedTransitions", fields: [transitionedById], references: [id])
+  transitionedAt   DateTime       @default(now()) @map("transitioned_at")
+
+  @@map("state_transitions")
+}
+
+model Block {
+  id           Int       @id @default(autoincrement())
+  shelterId    Int       @map("shelter_id")
+  shelter      Shelter   @relation(fields: [shelterId], references: [id])
+  name         String    @db.VarChar(100)
+  blockType    BlockType @map("block_type")
+  displayOrder Int       @map("display_order")
+  isActive     Boolean   @default(true) @map("is_active")
+  status       Int       @default(1)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  sections Section[]
+
+  @@map("blocks")
+}
+
+model Section {
+  id        Int      @id @default(autoincrement())
+  blockId   Int      @map("block_id")
+  block     Block    @relation(fields: [blockId], references: [id])
+  name      String   @db.VarChar(100)
+  priority  Int      @default(1)
+  isActive  Boolean  @default(true) @map("is_active")
+  status    Int      @default(1)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  kennels Kennel[]
+
+  @@map("sections")
+}
+
+model Kennel {
+  id            Int          @id @default(autoincrement())
+  sectionId     Int          @map("section_id")
+  section       Section      @relation(fields: [sectionId], references: [id])
+  kennelNumber  String       @map("kennel_number") @db.VarChar(20)
+  capacity      Int          @default(1)
+  status        KennelStatus @default(AVAILABLE)
+  notes         String?      @db.Text
+  lastCleanedAt DateTime?    @map("last_cleaned_at")
+  isActive      Boolean      @default(true) @map("is_active")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  dogs Dog[]
+
+  @@map("kennels")
+}
+
+model Otp {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  otp       String
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  verified  Boolean  @default(false)
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
