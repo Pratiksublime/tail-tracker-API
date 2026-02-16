@@ -289,3 +289,41 @@ model Otp {
 
   @@index([userId])
 }
+
+model TagBatch {
+  id              Int      @id @default(autoincrement())
+  prefix          String   @unique @db.VarChar(5)
+  yearMonth       String   @map("year_month") @db.VarChar(3)
+  sequence        Int
+  quantity        Int
+  batchSeed       Int      @map("batch_seed")
+  primeMultiplier Int      @map("prime_multiplier")
+  notes           String?  @db.Text
+  generatedAt     DateTime @map("generated_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  tags Tag[]
+
+  @@index([yearMonth, sequence])
+  @@map("tag_batches")
+}
+
+model Tag {
+  id          Int      @id @default(autoincrement())
+  batchId     Int      @map("batch_id")
+  sequence    Int
+  code        String   @unique @db.VarChar(15)
+  codeCompact String   @unique @map("code_compact") @db.VarChar(13)
+  qrPayload   String   @map("qr_payload") @db.VarChar(512)
+  isAssigned  Boolean  @default(false) @map("is_assigned")
+  assignedDog Int?     @map("assigned_dog")
+  assignedAt  DateTime? @map("assigned_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  batch TagBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@unique([batchId, sequence])
+  @@index([batchId, sequence])
+  @@map("tags")
+}

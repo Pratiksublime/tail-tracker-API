@@ -11,6 +11,10 @@ router.post("/by-rfid", verifyToken, Controller.getByRfid)
 router.post("/by-temp", verifyToken, Controller.getByTempId)
 router.post("/upload-photos", verifyToken, Controller.uploadPhotos)
 router.post("/delete-photo", verifyToken, Controller.deletePhoto)
+// router.get("/state", verifyToken, Controller.getCurrentState)
+// router.post("/state/transition", verifyToken, Controller.updateState)
+// router.get("/state/history", verifyToken, Controller.getStateHistory)
+// router.get("/state/allowed", verifyToken, Controller.getAllowedStateTransitions)
 
 
 export default router

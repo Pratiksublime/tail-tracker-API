@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Branded QR Code — Snap Style</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,500;9..40,700&family=Instrument+Serif:ital@0;1&display=swap');
+
+:root {
+  --teal: #235D61;
+  --teal-light: #2E7A7F;
+  --bg: #0A0F0F;
+  --surface: #111919;
+  --border: #1E2E2E;
+  --text: #E8F0F0;
+  --text-muted: #8AABAB;
+  --accent: #3ECFCF;
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+body::before {
+  content:'';
+  position:fixed; inset:0;
+  background-image:
+    linear-gradient(rgba(62,207,207,.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(62,207,207,.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events:none; z-index:0;
+}
+
+.container { max-width:1100px; margin:0 auto; padding:32px 24px; position:relative; z-index:1; }
+
+header { text-align:center; margin-bottom:48px; }
+header h1 {
+  font-family:'Instrument Serif',serif;
+  font-size:2.8rem; font-weight:400;
+  background: linear-gradient(135deg, var(--accent), var(--teal-light));
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+  background-clip:text;
+  margin-bottom:8px;
+}
+header p { color:var(--text-muted); font-size:0.95rem; font-weight:300; }
+
+.main-grid { display:grid; grid-template-columns:1fr 1fr; gap:32px; align-items:start; }
+@media(max-width:768px){ .main-grid{grid-template-columns:1fr;} header h1{font-size:2rem;} }
+
+.panel { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:28px; }
+.panel-title { font-family:'Instrument Serif',serif; font-size:1.35rem; margin-bottom:24px; display:flex; align-items:center; gap:10px; }
+.panel-title .dot { width:8px; height:8px; border-radius:50%; background:var(--accent); }
+
+label { display:block; font-size:0.8rem; font-weight:500; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:8px; }
+input[type="url"], input[type="text"], select {
+  width:100%; padding:12px 16px; background:var(--bg); border:1px solid var(--border);
+  border-radius:10px; color:var(--text); font-family:'DM Sans',sans-serif; font-size:0.95rem;
+  outline:none; transition:border-color .2s;
+}
+input:focus, select:focus { border-color:var(--teal-light); }
+
+.field-group { margin-bottom:20px; }
+
+.color-row { display:flex; gap:16px; }
+.color-row .field-group { flex:1; }
+.color-input-wrap { display:flex; align-items:center; gap:10px; background:var(--bg); border:1px solid var(--border); border-radius:10px; padding:6px 12px; }
+.color-input-wrap input[type="color"] { width:32px; height:32px; border:none; background:none; cursor:pointer; border-radius:6px; padding:0; }
+.color-input-wrap input[type="color"]::-webkit-color-swatch-wrapper { padding:0; }
+.color-input-wrap input[type="color"]::-webkit-color-swatch { border:none; border-radius:4px; }
+.color-input-wrap span { font-size:0.85rem; color:var(--text-muted); font-family:monospace; }
+
+.style-options { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+.style-btn { padding:10px 8px; background:var(--bg); border:1px solid var(--border); border-radius:10px; color:var(--text-muted); font-family:'DM Sans',sans-serif; font-size:0.8rem; cursor:pointer; transition:all .2s; text-align:center; }
+.style-btn:hover { border-color:var(--teal-light); color:var(--text); }
+.style-btn.active { border-color:var(--accent); color:var(--accent); background:rgba(62,207,207,.06); }
+
+.range-group { margin-bottom:20px; }
+.range-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+.range-value { font-size:0.85rem; color:var(--accent); font-family:monospace; }
+input[type="range"] { -webkit-appearance:none; width:100%; height:4px; background:var(--border); border-radius:4px; outline:none; }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance:none; width:18px; height:18px; border-radius:50%; background:var(--accent); cursor:pointer; border:2px solid var(--bg); }
+
+.generate-btn { width:100%; padding:14px; background:linear-gradient(135deg,var(--teal),var(--teal-light)); border:none; border-radius:12px; color:white; font-family:'DM Sans',sans-serif; font-size:1rem; font-weight:600; cursor:pointer; transition:all .3s; margin-top:8px; }
+.generate-btn:hover { transform:translateY(-1px); box-shadow:0 8px 24px rgba(35,93,97,.4); }
+
+.preview-area { display:flex; flex-direction:column; align-items:center; gap:24px; }
+.qr-canvas-wrap {
+  background:repeating-conic-gradient(#1a1a1a 0% 25%, #222 0% 50%) 50%/16px 16px;
+  border-radius:16px; padding:24px; display:flex; align-items:center; justify-content:center;
+  border:1px solid var(--border);
+}
+
+.download-row { display:flex; gap:10px; width:100%; }
+.dl-btn { flex:1; padding:12px; border-radius:10px; border:1px solid var(--border); background:var(--surface); color:var(--text); font-family:'DM Sans',sans-serif; font-size:0.85rem; font-weight:500; cursor:pointer; transition:all .2s; }
+.dl-btn:hover { border-color:var(--teal-light); }
+.dl-btn.primary { background:var(--teal); border-color:var(--teal); }
+.dl-btn.primary:hover { background:var(--teal-light); }
+
+.info-badge { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; background:rgba(62,207,207,.08); border:1px solid rgba(62,207,207,.15); border-radius:8px; font-size:0.75rem; color:var(--accent); }
+
+.section-divider { border:none; border-top:1px solid var(--border); margin:20px 0; }
+
+#qrHidden { position:absolute; left:-9999px; top:-9999px; }
+
+/* Logo upload area */
+.logo-upload-area {
+  border:2px dashed var(--border); border-radius:12px; padding:20px;
+  text-align:center; cursor:pointer; transition:all .2s; position:relative;
+  background:var(--bg);
+}
+.logo-upload-area:hover { border-color:var(--teal-light); }
+.logo-upload-area.has-logo { border-style:solid; border-color:var(--accent); }
+.logo-upload-area input[type="file"] { position:absolute; inset:0; opacity:0; cursor:pointer; }
+.logo-upload-area .upload-icon { font-size:2rem; margin-bottom:8px; opacity:.5; }
+.logo-upload-area .upload-text { font-size:0.82rem; color:var(--text-muted); }
+.logo-upload-area .upload-text strong { color:var(--accent); }
+.logo-preview-thumb {
+  width:60px; height:60px; border-radius:50%; object-fit:cover;
+  border:2px solid var(--accent); display:none; margin:0 auto 8px;
+}
+.logo-upload-area.has-logo .upload-icon { display:none; }
+.logo-upload-area.has-logo .logo-preview-thumb { display:block; }
+
+.back-link {
+  display:inline-flex; align-items:center; gap:6px;
+  color:var(--text-muted); text-decoration:none; font-size:0.85rem;
+  margin-bottom:16px; transition:color .2s;
+}
+.back-link:hover { color:var(--accent); }
+</style>
+</head>
+<body>
+<div id="qrHidden"></div>
+
+<div class="container">
+  <a href="index.html" class="back-link">&larr; Back to Basic Generator</a>
+
+  <header>
+    <h1>Snap-Style QR Generator</h1>
+    <p>Scannable branded QR codes with your icon in the center &mdash; like Snapchat's Snapcode</p>
+  </header>
+
+  <div class="main-grid">
+    <!-- LEFT: Configuration -->
+    <div class="panel">
+      <div class="panel-title"><span class="dot"></span> Configuration</div>
+
+      <div class="field-group">
+        <label>Center Logo / Icon</label>
+        <div class="logo-upload-area" id="logoUploadArea">
+          <input type="file" id="logoFileInput" accept="image/*">
+          <img class="logo-preview-thumb" id="logoThumb" alt="Logo preview">
+          <div class="upload-icon">&#128247;</div>
+          <div class="upload-text">Click or drag to upload your <strong>logo image</strong><br>Black background will be removed automatically</div>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <label>Target URL</label>
+        <input type="url" id="urlInput" placeholder="https://yoursite.com/page" value="https://example.com">
+      </div>
+
+      <div class="field-group">
+        <label>QR Dot Style</label>
+        <div class="style-options">
+          <button class="style-btn active" data-style="rounded" onclick="setStyle(this)">&#9679; Rounded</button>
+          <button class="style-btn" data-style="square" onclick="setStyle(this)">&#9632; Square</button>
+          <button class="style-btn" data-style="dots" onclick="setStyle(this)">&#9673; Dots</button>
+        </div>
+      </div>
+
+      <div class="color-row">
+        <div class="field-group">
+          <label>Brand Color (BG Ring)</label>
+          <div class="color-input-wrap">
+            <input type="color" id="brandColor" value="#235D61">
+            <span id="brandHex">#235D61</span>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>QR Dot Color</label>
+          <div class="color-input-wrap">
+            <input type="color" id="dotColor" value="#1A4548">
+            <span id="dotHex">#1A4548</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="range-group">
+        <div class="range-header">
+          <label style="margin:0">QR Size</label>
+          <span class="range-value" id="sizeVal">500px</span>
+        </div>
+        <input type="range" id="sizeRange" min="300" max="800" value="500" step="50">
+      </div>
+
+      <div class="range-group">
+        <div class="range-header">
+          <label style="margin:0">Icon Size</label>
+          <span class="range-value" id="iconSizeVal">24%</span>
+        </div>
+        <input type="range" id="iconSizeRange" min="14" max="32" value="24" step="1">
+      </div>
+
+      <div class="range-group">
+        <div class="range-header">
+          <label style="margin:0">Corner Radius</label>
+          <span class="range-value" id="cornerVal">24px</span>
+        </div>
+        <input type="range" id="cornerRange" min="0" max="60" value="24" step="2">
+      </div>
+
+      <div class="field-group">
+        <label>Error Correction</label>
+        <select id="ecLevel">
+          <option value="L">Low (7%)</option>
+          <option value="M">Medium (15%)</option>
+          <option value="Q">Quartile (25%)</option>
+          <option value="H" selected>High (30%) — recommended for logo overlay</option>
+        </select>
+      </div>
+
+      <hr class="section-divider">
+      <button class="generate-btn" onclick="generateQR()">&#9889; Generate QR Code</button>
+    </div>
+
+    <!-- RIGHT: Preview & Download -->
+    <div>
+      <div class="panel">
+        <div class="panel-title"><span class="dot"></span> Preview</div>
+        <div class="preview-area">
+          <div class="qr-canvas-wrap">
+            <canvas id="qrOutput" width="500" height="500"></canvas>
+          </div>
+          <div class="info-badge" id="infoBadge" style="display:none">
+            &#10003; Scannable &mdash; EC: <span id="ecInfo">H</span>
+          </div>
+          <div class="download-row">
+            <button class="dl-btn primary" onclick="downloadQR('png')">&#8595; PNG</button>
+            <button class="dl-btn" onclick="downloadQR('jpg')">&#8595; JPG</button>
+            <button class="dl-btn" onclick="downloadQR('svg')">&#8595; SVG</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ========================================================================
+//  State
+// ========================================================================
+let currentStyle = 'rounded';
+let qrGenerated = false;
+let qrModules = null;
+let processedLogoDataURL = null;   // circular, black-bg-removed logo
+
+// ========================================================================
+//  Logo upload & processing  (replaces the Python/PIL step)
+// ========================================================================
+const logoFileInput = document.getElementById('logoFileInput');
+const logoUploadArea = document.getElementById('logoUploadArea');
+const logoThumb = document.getElementById('logoThumb');
+
+logoFileInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  processLogoFile(file);
+});
+
+// Also handle drag-and-drop
+logoUploadArea.addEventListener('dragover', (e) => { e.preventDefault(); logoUploadArea.style.borderColor = 'var(--accent)'; });
+logoUploadArea.addEventListener('dragleave', () => { logoUploadArea.style.borderColor = ''; });
+logoUploadArea.addEventListener('drop', (e) => {
+  e.preventDefault();
+  logoUploadArea.style.borderColor = '';
+  const file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith('image/')) {
+    processLogoFile(file);
+  }
+});
+
+function processLogoFile(file) {
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    const img = new Image();
+    img.onload = () => {
+      processedLogoDataURL = processLogoImage(img);
+      logoThumb.src = processedLogoDataURL;
+      logoUploadArea.classList.add('has-logo');
+      // Re-render if QR already generated
+      if (qrGenerated) renderQR();
+    };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+/**
+ * In-browser equivalent of the Python PIL processing:
+ * 1. Draws the logo onto a 300x300 canvas
+ * 2. Removes black/near-black background pixels (makes them transparent)
+ * 3. Crops to a circle
+ * Returns a data URL of the processed image (PNG with alpha)
+ */
+function processLogoImage(img) {
+  const S = 300;
+  const c = document.createElement('canvas');
+  c.width = S; c.height = S;
+  const ctx = c.getContext('2d');
+
+  // Draw the source image resized to 300x300
+  ctx.drawImage(img, 0, 0, S, S);
+
+  const imageData = ctx.getImageData(0, 0, S, S);
+  const px = imageData.data;
+
+  // Step 1: Remove dark/black background pixels — threshold ~30
+  const threshold = 30;
+  for (let i = 0; i < px.length; i += 4) {
+    const r = px[i], g = px[i+1], b = px[i+2];
+    if (r < threshold && g < threshold && b < threshold) {
+      px[i+3] = 0; // make transparent
+    }
+  }
+
+  // Step 2: Apply circular mask
+  const cx = S / 2, cy = S / 2, radius = S / 2;
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const dx = x - cx, dy = y - cy;
+      if (dx * dx + dy * dy > radius * radius) {
+        const idx = (y * S + x) * 4;
+        px[idx + 3] = 0; // outside circle = transparent
+      }
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+  return c.toDataURL('image/png');
+}
+
+// ========================================================================
+//  UI Bindings
+// ========================================================================
+function setStyle(btn) {
+  document.querySelectorAll('.style-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentStyle = btn.dataset.style;
+  if (qrGenerated) renderQR();
+}
+
+document.getElementById('brandColor').addEventListener('input', e => {
+  document.getElementById('brandHex').textContent = e.target.value.toUpperCase();
+  if (qrGenerated) renderQR();
+});
+document.getElementById('dotColor').addEventListener('input', e => {
+  document.getElementById('dotHex').textContent = e.target.value.toUpperCase();
+  if (qrGenerated) renderQR();
+});
+document.getElementById('sizeRange').addEventListener('input', e => {
+  document.getElementById('sizeVal').textContent = e.target.value + 'px';
+  if (qrGenerated) renderQR();
+});
+document.getElementById('iconSizeRange').addEventListener('input', e => {
+  document.getElementById('iconSizeVal').textContent = e.target.value + '%';
+  if (qrGenerated) renderQR();
+});
+document.getElementById('cornerRange').addEventListener('input', e => {
+  document.getElementById('cornerVal').textContent = e.target.value + 'px';
+  if (qrGenerated) renderQR();
+});
+
+// ========================================================================
+//  QR Generation (extract module matrix via qrcodejs)
+// ========================================================================
+function generateQR() {
+  const url = document.getElementById('urlInput').value.trim();
+  if (!url) { alert('Please enter a URL'); return; }
+
+  const ecl = document.getElementById('ecLevel').value;
+  const ecMap = { L: QRCode.CorrectLevel.L, M: QRCode.CorrectLevel.M, Q: QRCode.CorrectLevel.Q, H: QRCode.CorrectLevel.H };
+
+  const hiddenDiv = document.getElementById('qrHidden');
+  hiddenDiv.innerHTML = '';
+
+  const tempQR = new QRCode(hiddenDiv, {
+    text: url, width: 256, height: 256,
+    colorDark: '#000000', colorLight: '#ffffff',
+    correctLevel: ecMap[ecl]
+  });
+
+  // qrcodejs exposes the internal QR model after a tick
+  setTimeout(() => {
+    const qrObj = tempQR._oQRCode;
+    if (!qrObj) { alert('QR generation failed — please check the URL.'); return; }
+
+    const mc = qrObj.getModuleCount();
+    qrModules = [];
+    for (let r = 0; r < mc; r++) {
+      qrModules[r] = [];
+      for (let c = 0; c < mc; c++) {
+        qrModules[r][c] = qrObj.isDark(r, c);
+      }
+    }
+
+    qrGenerated = true;
+    renderQR();
+    document.getElementById('infoBadge').style.display = 'flex';
+    document.getElementById('ecInfo').textContent = ecl;
+  }, 200);
+}
+
+// ========================================================================
+//  QR Rendering (Snap-style branded)
+// ========================================================================
+function renderQR() {
+  if (!qrModules) return;
+
+  const size      = parseInt(document.getElementById('sizeRange').value);
+  const brandColor= document.getElementById('brandColor').value;
+  const dotColor  = document.getElementById('dotColor').value;
+  const iconPct   = parseInt(document.getElementById('iconSizeRange').value) / 100;
+  const cornerR   = parseInt(document.getElementById('cornerRange').value);
+
+  const canvas = document.getElementById('qrOutput');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+
+  const mc = qrModules.length;
+  const padding    = size * 0.08;
+  const qrArea     = size - padding * 2;
+  const moduleSize = qrArea / (mc + 2);
+  const qrOffset   = padding + moduleSize;
+
+  // === 1. White background with rounded corners ===
+  ctx.fillStyle = '#ffffff';
+  roundRect(ctx, 0, 0, size, size, cornerR);
+  ctx.fill();
+
+  // === 2. Brand color border ring ===
+  const borderW = size * 0.035;
+  ctx.strokeStyle = brandColor;
+  ctx.lineWidth = borderW;
+  roundRect(ctx, borderW/2, borderW/2, size - borderW, size - borderW, Math.max(0, cornerR - borderW/2));
+  ctx.stroke();
+
+  // === 3. Draw QR modules (skip finder zones + center icon zone) ===
+  const centerMod = mc / 2;
+  const iconModR  = Math.floor(mc * iconPct / 2);
+
+  const finderPositions = [[0,0],[0,mc-7],[mc-7,0]];
+
+  ctx.fillStyle = dotColor;
+  for (let r = 0; r < mc; r++) {
+    for (let c = 0; c < mc; c++) {
+      if (!qrModules[r][c]) continue;
+
+      // Skip center icon zone
+      if (Math.abs(r - centerMod + 0.5) < iconModR && Math.abs(c - centerMod + 0.5) < iconModR) continue;
+
+      // Skip finder pattern zone (we'll redraw them styled)
+      if (finderPositions.some(([fr, fc]) => r >= fr && r < fr + 7 && c >= fc && c < fc + 7)) continue;
+
+      const x = qrOffset + c * moduleSize;
+      const y = qrOffset + r * moduleSize;
+      const s = moduleSize;
+
+      ctx.fillStyle = dotColor;
+      switch (currentStyle) {
+        case 'rounded': {
+          const rad = s * 0.35;
+          ctx.beginPath();
+          ctx.moveTo(x + rad, y);
+          ctx.lineTo(x + s - rad, y);
+          ctx.quadraticCurveTo(x + s, y, x + s, y + rad);
+          ctx.lineTo(x + s, y + s - rad);
+          ctx.quadraticCurveTo(x + s, y + s, x + s - rad, y + s);
+          ctx.lineTo(x + rad, y + s);
+          ctx.quadraticCurveTo(x, y + s, x, y + s - rad);
+          ctx.lineTo(x, y + rad);
+          ctx.quadraticCurveTo(x, y, x + rad, y);
+          ctx.closePath();
+          ctx.fill();
+          break;
+        }
+        case 'square':
+          ctx.fillRect(x, y, s, s);
+          break;
+        case 'dots':
+          ctx.beginPath();
+          ctx.arc(x + s/2, y + s/2, s * 0.42, 0, Math.PI * 2);
+          ctx.fill();
+          break;
+      }
+    }
+  }
+
+  // === 4. Branded finder patterns (3 corner squares) ===
+  finderPositions.forEach(([fr, fc]) => {
+    const fx = qrOffset + fc * moduleSize;
+    const fy = qrOffset + fr * moduleSize;
+    const fSize = 7 * moduleSize;
+    const outerR = moduleSize * 0.8;
+
+    // Clear the finder area
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(fx - moduleSize * 0.1, fy - moduleSize * 0.1, fSize + moduleSize * 0.2, fSize + moduleSize * 0.2);
+
+    // Outer ring
+    ctx.strokeStyle = dotColor;
+    ctx.lineWidth = moduleSize * 0.85;
+    roundRect(ctx, fx + moduleSize * 0.45, fy + moduleSize * 0.45, fSize - moduleSize * 0.9, fSize - moduleSize * 0.9, outerR);
+    ctx.stroke();
+
+    // Inner solid square
+    ctx.fillStyle = dotColor;
+    const innerOff = moduleSize * 2;
+    const innerSz  = fSize - moduleSize * 4;
+    const innerR   = moduleSize * 0.5;
+    roundRect(ctx, fx + innerOff, fy + innerOff, innerSz, innerSz, innerR);
+    ctx.fill();
+  });
+
+  // === 5. Center icon — circular with brand ring ===
+  const iconPixelSize = size * iconPct;
+  const cx = size / 2;
+  const cy = size / 2;
+  const iconRadius = iconPixelSize / 2;
+
+  // White circle background
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(cx, cy, iconRadius + iconPixelSize * 0.12, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Brand color ring
+  ctx.strokeStyle = brandColor;
+  ctx.lineWidth = iconPixelSize * 0.08;
+  ctx.beginPath();
+  ctx.arc(cx, cy, iconRadius + iconPixelSize * 0.06, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Draw the logo (if uploaded)
+  if (processedLogoDataURL) {
+    const logoImg = new Image();
+    logoImg.onload = () => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, iconRadius, 0, Math.PI * 2);
+      ctx.clip();
+      // White bg inside circle
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(cx - iconRadius, cy - iconRadius, iconRadius * 2, iconRadius * 2);
+      // Draw logo
+      ctx.drawImage(logoImg, cx - iconRadius, cy - iconRadius, iconRadius * 2, iconRadius * 2);
+      ctx.restore();
+    };
+    logoImg.src = processedLogoDataURL;
+  } else {
+    // No logo — draw a placeholder
+    ctx.fillStyle = '#f0f0f0';
+    ctx.beginPath();
+    ctx.arc(cx, cy, iconRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#bbb';
+    ctx.font = `${iconRadius * 0.4}px DM Sans, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('LOGO', cx, cy);
+  }
+}
+
+// ========================================================================
+//  Helpers
+// ========================================================================
+function roundRect(ctx, x, y, w, h, r) {
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function downloadQR(format) {
+  if (!qrGenerated) { alert('Generate a QR code first'); return; }
+  const canvas = document.getElementById('qrOutput');
+
+  if (format === 'svg') {
+    // Build an SVG from the canvas
+    const svgStr = canvasToSVG(canvas);
+    const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+    triggerDL(blob, 'branded-qr-code.svg');
+  } else if (format === 'jpg') {
+    // JPG needs white bg (canvas already has it)
+    const link = document.createElement('a');
+    link.download = 'branded-qr-code.jpg';
+    link.href = canvas.toDataURL('image/jpeg', 0.95);
+    link.click();
+  } else {
+    const link = document.createElement('a');
+    link.download = 'branded-qr-code.png';
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  }
+}
+
+function canvasToSVG(canvas) {
+  const dataUrl = canvas.toDataURL('image/png');
+  const w = canvas.width, h = canvas.height;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+  <image href="${dataUrl}" width="${w}" height="${h}"/>
+</svg>`;
+}
+
+function triggerDL(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 100);
+}
+
+// ========================================================================
+//  Auto-generate on load
+// ========================================================================
+window.addEventListener('DOMContentLoaded', () => setTimeout(generateQR, 300));
+</script>
+</body>
+</html>
+
