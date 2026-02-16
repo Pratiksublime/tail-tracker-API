@@ -23,8 +23,6 @@ const LOGO_PATH =
       : path.join(process.cwd(), process.env.QR_LOGO_PATH)
     : path.join(process.cwd(), "public", "logo_new.png");
 
-console.log("LOGO_PATH", LOGO_PATH)
-
 const QR_CENTER_LOGO_PATH =
   process.env.QR_CENTER_LOGO_PATH
     ? path.isAbsolute(process.env.QR_CENTER_LOGO_PATH)
@@ -37,6 +35,7 @@ const DEFAULT_QR_MARGIN = 2;
 const DEFAULT_LOGO_SIZE = 80;
 const MAX_QR_PER_PDF = 100;
 const QR_BRAND_COLOR = "#235D61";
+const QR_RENDER_CONCURRENCY = Math.max(1, Number(process.env.QR_RENDER_CONCURRENCY || 4));
 
 function createTagGenerator(baseUrl?: string): TagCodeGenerator {
   return new TagCodeGenerator({ baseUrl: baseUrl || QR_TAG_BASE_URL });
@@ -52,6 +51,85 @@ function splitPrefix(prefix: string) {
     yearMonth: match[1],
     sequence: Number(match[2]),
   };
+}
+
+type CenterQrAssets = { logo: Buffer; knockout: Buffer };
+const centerQrAssetsCache = new Map<string, Promise<CenterQrAssets>>();
+let rightLogoCache:
+  | {
+    key: string;
+    buffer: Buffer;
+    width: number;
+    height: number;
+  }
+  | null = null;
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+
+  const workers = new Array(Math.min(concurrency, items.length)).fill(null).map(async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+async function getCenterQrAssets(logoSize: number, innerLogoSize: number): Promise<CenterQrAssets> {
+  const logoSourcePath = fs.existsSync(QR_CENTER_LOGO_PATH) ? QR_CENTER_LOGO_PATH : LOGO_PATH;
+  const key = `${logoSourcePath}|${logoSize}|${innerLogoSize}`;
+
+  if (!centerQrAssetsCache.has(key)) {
+    centerQrAssetsCache.set(
+      key,
+      (async () => {
+        const logoRaw = await sharp(logoSourcePath)
+          .resize(innerLogoSize, innerLogoSize, { fit: "contain" })
+          .ensureAlpha()
+          .png()
+          .toBuffer();
+
+        const logoMaskSvg = `
+          <svg xmlns="http://www.w3.org/2000/svg" width="${innerLogoSize}" height="${innerLogoSize}">
+            <circle cx="${innerLogoSize / 2}" cy="${innerLogoSize / 2}" r="${(innerLogoSize / 2) - 1}" fill="#FFFFFF"/>
+          </svg>
+        `;
+        const logoMask = await sharp(Buffer.from(logoMaskSvg)).png().toBuffer();
+        const logo = await sharp(logoRaw)
+          .composite([{ input: logoMask, blend: "dest-in" }])
+          .png()
+          .toBuffer();
+
+        const borderWidth = Math.max(3, Math.round(logoSize * 0.06));
+        const knockoutSvg = `
+          <svg xmlns="http://www.w3.org/2000/svg" width="${logoSize}" height="${logoSize}">
+            <circle
+              cx="${logoSize / 2}"
+              cy="${logoSize / 2}"
+              r="${(logoSize / 2) - borderWidth / 2}"
+              fill="#FFFFFF"
+              stroke="${QR_BRAND_COLOR}"
+              stroke-width="${borderWidth}"
+            />
+          </svg>
+        `;
+        const knockout = await sharp(Buffer.from(knockoutSvg)).png().toBuffer();
+
+        return { logo, knockout };
+      })()
+    );
+  }
+
+  return centerQrAssetsCache.get(key)!;
 }
 
 
@@ -109,42 +187,7 @@ async function buildBrandedQrPng(
   svg += `</svg>`;
   const qrPng = await sharp(Buffer.from(svg)).png().toBuffer();
 
-  const logoSourcePath = fs.existsSync(QR_CENTER_LOGO_PATH) ? QR_CENTER_LOGO_PATH : LOGO_PATH;
-  console.log("logoSourcePath", logoSourcePath)
-  // ✅ Flatten logo onto white so QR dots never show through transparent parts
-  const logoRaw = await sharp(logoSourcePath)
-    .resize(innerLogoSize, innerLogoSize, { fit: "contain" })
-    .ensureAlpha()
-    .png()
-    .toBuffer();
-
-  const logoMaskSvg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="${innerLogoSize}" height="${innerLogoSize}">
-      <circle cx="${innerLogoSize / 2}" cy="${innerLogoSize / 2}" r="${(innerLogoSize / 2) - 1}" fill="#FFFFFF"/>
-    </svg>
-  `;
-  const logoMask = await sharp(Buffer.from(logoMaskSvg)).png().toBuffer();
-  const logo = await sharp(logoRaw)
-    .composite([{ input: logoMask, blend: "dest-in" }])
-    .png()
-    .toBuffer();
-
-  // Rounded white badge behind logo with brand border.
-  const knockoutSize = logoSize;
-  const borderWidth = Math.max(3, Math.round(logoSize * 0.06));
-  const knockoutSvg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="${knockoutSize}" height="${knockoutSize}">
-      <circle
-        cx="${knockoutSize / 2}"
-        cy="${knockoutSize / 2}"
-        r="${(knockoutSize / 2) - borderWidth / 2}"
-        fill="#FFFFFF"
-        stroke="${QR_BRAND_COLOR}"
-        stroke-width="${borderWidth}"
-      />
-    </svg>
-  `;
-  const knockout = await sharp(Buffer.from(knockoutSvg)).png().toBuffer();
+  const { logo, knockout } = await getCenterQrAssets(logoSize, innerLogoSize);
 
   return sharp(qrPng)
     .composite([
@@ -162,6 +205,31 @@ async function preprocessRightLogo(rawLogo: Buffer, targetW: number, targetH: nu
     .resize(targetW, targetH, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
     .png()
     .toBuffer();
+}
+
+async function getRightLogoForPanel(targetW: number, targetH: number): Promise<{ buffer: Buffer; width: number; height: number } | null> {
+  try {
+    const stat = await fsp.stat(LOGO_PATH);
+    const key = `${LOGO_PATH}|${stat.mtimeMs}|${targetW}|${targetH}`;
+    if (rightLogoCache && rightLogoCache.key === key) {
+      return {
+        buffer: rightLogoCache.buffer,
+        width: rightLogoCache.width,
+        height: rightLogoCache.height,
+      };
+    }
+
+    const rawLogo = await fsp.readFile(LOGO_PATH);
+    const buffer = await preprocessRightLogo(rawLogo, targetW, targetH);
+    const meta = await sharp(buffer).metadata();
+    const width = meta.width || targetW;
+    const height = meta.height || targetH;
+
+    rightLogoCache = { key, buffer, width, height };
+    return { buffer, width, height };
+  } catch {
+    return null;
+  }
 }
 
 async function buildSnapStyleCardPng(qrPayload: string, codeText: string): Promise<Buffer> {
@@ -227,15 +295,12 @@ async function buildSnapStyleCardPng(qrPayload: string, codeText: string): Promi
   const linkFontSize = 30;
   const sectionGap = 20;
 
-  try {
-    const rawLogo = await fsp.readFile(LOGO_PATH);
-    logoBuffer = await preprocessRightLogo(rawLogo, rightPanelW, Math.floor(rightPanelH * 0.78));
-    const meta = await sharp(logoBuffer).metadata();
-    logoW = meta.width || rightPanelW;
-    logoH = meta.height || Math.floor(rightPanelH * 0.78);
+  const rightLogo = await getRightLogoForPanel(rightPanelW, Math.floor(rightPanelH * 0.78));
+  if (rightLogo) {
+    logoBuffer = rightLogo.buffer;
+    logoW = rightLogo.width;
+    logoH = rightLogo.height;
     logoLeft = rightPanelX + Math.max(0, Math.floor((rightPanelW - logoW) / 2));
-  } catch {
-    logoBuffer = null;
   }
 
   const rightContentH = logoH + sectionGap + linkFontSize;
@@ -537,10 +602,11 @@ export const generateBulkTagPdf = async (req: Request, res: Response) => {
       const end = Math.min(start + perPdf, totalTags);
       const chunk = batch.tags.slice(start, end);
 
-      const cards: Buffer[] = [];
-      for (const tag of chunk) {
-        cards.push(await buildSnapStyleCardPng(tag.qrPayload, tag.code));
-      }
+      const cards = await mapWithConcurrency(
+        chunk,
+        QR_RENDER_CONCURRENCY,
+        async (tag) => buildSnapStyleCardPng(tag.qrPayload, tag.code)
+      );
 
       const fileName = `${batch.batch.prefix}_part_${String(i + 1).padStart(3, "0")}_of_${String(totalPdfs).padStart(3, "0")}.pdf`;
       const outputPath = path.join(outputDir, fileName);
@@ -1017,3 +1083,4 @@ export const assignScannedCodeToDog = async (req: Request, res: Response) => {
     qrCode: dog!.qrCode,
   });
 };
+
