@@ -17,6 +17,8 @@ import "./lib/redis";
 dotenv.config();
 
 // Route Imports
+import adminIntakeRoutes from "./module/Admin/Intake/routes";
+import adminComplaintRoutes from "./module/Admin/Complaint/routes";
 import adminOrganizations from "./module/Admin/Organizations/routes";
 import adminQrGenerator from "./module/Admin/QrGenerator/routes";
 import adminShelters from "./module/Admin/Shelters/routes";
@@ -73,6 +75,8 @@ app.use('/uploads', express.static(path.join(process.cwd(), 'public/uploads')));
 app.use("/api/v1/auth", mobileAuth);
 app.use("/api/v1/dogs", mobileDogsRoutes);
 app.use("/api/v1/intake", mobileIntakeRoutes);
+app.use("/api/v1/admin/intake", adminIntakeRoutes);
+app.use("/api/v1/admin/complaint", adminComplaintRoutes);
 
 // Admin Routes
 app.use("/api/v1/admin/users", adminUsers);

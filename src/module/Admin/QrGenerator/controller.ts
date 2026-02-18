@@ -403,6 +403,7 @@ export const createTagBatch = async (req: Request, res: Response) => {
       persistBatch = true,
     } = req.body || {};
 
+
     const parsedQty = Number(quantity);
     if (!parsedQty || Number.isNaN(parsedQty)) {
       return res.status(400).json({ success: false, message: "quantity (number) is required" });
@@ -649,381 +650,92 @@ export const generateBulkTagPdf = async (req: Request, res: Response) => {
   }
 };
 
-export const generateSingleTagCode = async (req: Request, res: Response) => {
+export const fetchTag = async (req: Request, res: Response) => {
   try {
-    const { prefix, sequenceNum, seed, prime, baseUrl } = req.body || {};
-
-    if (!prefix || sequenceNum === undefined || seed === undefined || prime === undefined) {
-      return res.status(400).json({
-        success: false,
-        message: "prefix, sequenceNum, seed, prime are required",
-      });
-    }
-
-    const generator = createTagGenerator(baseUrl);
-    const result = generator.generateCode(
-      String(prefix).toUpperCase(),
-      Number(sequenceNum),
-      Number(seed),
-      Number(prime)
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: "Tag code generated",
-      data: result,
-    });
-  } catch (e: any) {
-    return res.status(400).json({ success: false, message: e?.message || "Failed to generate code" });
-  }
-};
-
-export const regenerateTagCode = async (req: Request, res: Response) => {
-  try {
-    const { prefix, sequenceNum, seed, prime, baseUrl } = req.body || {};
-
-    if (!prefix || sequenceNum === undefined || seed === undefined || prime === undefined) {
-      return res.status(400).json({
-        success: false,
-        message: "prefix, sequenceNum, seed, prime are required",
-      });
-    }
-
-    const generator = createTagGenerator(baseUrl);
-    const result = generator.regenerateCode(
-      String(prefix).toUpperCase(),
-      Number(sequenceNum),
-      Number(seed),
-      Number(prime)
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: "Tag code regenerated",
-      data: result,
-    });
-  } catch (e: any) {
-    return res.status(400).json({ success: false, message: e?.message || "Failed to regenerate code" });
-  }
-};
-
-export const parseTagCode = async (req: Request, res: Response) => {
-  const { input, baseUrl } = req.body || {};
-  if (!input) {
-    return res.status(400).json({ success: false, message: "input is required" });
-  }
-
-  const generator = createTagGenerator(baseUrl);
-  const parsed = generator.parseCode(String(input));
-
-  return res.status(parsed.isValid ? 200 : 422).json({
-    success: parsed.isValid,
-    message: parsed.isValid ? "Tag code parsed" : "Invalid tag code",
-    data: parsed,
-  });
-};
-
-export const validateTagCode = async (req: Request, res: Response) => {
-  const { input, baseUrl } = req.body || {};
-  if (!input) {
-    return res.status(400).json({ success: false, message: "input is required" });
-  }
-
-  const generator = createTagGenerator(baseUrl);
-  const validation = generator.validateManualEntry(String(input));
-
-  return res.status(validation.isValid ? 200 : 422).json({
-    success: validation.isValid,
-    message: validation.isValid ? "Valid tag code" : "Invalid tag code",
-    data: validation,
-  });
-};
-
-export const generateTagQrImage = async (req: Request, res: Response) => {
-  try {
-    const {
-      code,
-      codeCompact,
-      prefix,
-      sequenceNum,
-      seed,
-      prime,
-      baseUrl,
-      width,
-      margin,
-      logoSize,
-    } = req.body || {};
-
-    const generator = createTagGenerator(baseUrl);
-
-    let payloadUrl = "";
-    let resolvedCompactCode = "";
-
-    if (code || codeCompact) {
-      const parsed = generator.parseCode(String(code || codeCompact));
-      if (!parsed.isValid || !parsed.codeCompact || !parsed.qrPayload) {
-        return res.status(422).json({
-          success: false,
-          message: parsed.error || "Invalid code/codeCompact",
-          data: parsed,
-        });
-      }
-      payloadUrl = parsed.qrPayload;
-      resolvedCompactCode = parsed.codeCompact;
-    } else if (prefix && sequenceNum !== undefined && seed !== undefined && prime !== undefined) {
-      const generated = generator.generateCode(
-        String(prefix).toUpperCase(),
-        Number(sequenceNum),
-        Number(seed),
-        Number(prime)
-      );
-      payloadUrl = generated.qrPayload;
-      resolvedCompactCode = generated.codeCompact;
-    } else {
-      return res.status(400).json({
-        success: false,
-        message: "Provide either (code/codeCompact) OR (prefix, sequenceNum, seed, prime)",
-      });
-    }
-
-    const finalPng = await buildBrandedQrPng(
-      payloadUrl,
-      width ? Number(width) : DEFAULT_QR_WIDTH,
-      margin ? Number(margin) : DEFAULT_QR_MARGIN,
-      logoSize ? Number(logoSize) : DEFAULT_LOGO_SIZE
-    );
-
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader("Cache-Control", "no-store");
-    res.setHeader("X-QR-URL", payloadUrl);
-    res.setHeader("X-QR-CODE", resolvedCompactCode);
-
-    return res.status(200).send(finalPng);
-  } catch (e: any) {
-    return res.status(500).json({
-      success: false,
-      message: "Failed to generate tag QR image",
-      error: e?.message,
-    });
-  }
-};
-
-export const getNextTagPrefix = async (req: Request, res: Response) => {
-  try {
-    const generator = createTagGenerator();
-    const now = new Date();
-    const year = now.getFullYear().toString().slice(-2);
-    const yearMonth = `${year}${MONTH_MAP[now.getMonth()]}`;
-
-    const lastBatch = await prisma.tagBatch.findFirst({
-      where: { yearMonth },
-      orderBy: { sequence: "desc" },
-      select: { sequence: true },
-    });
-
-    const maxSeq = lastBatch?.sequence || 0;
-
-    const nextPrefix = generator.generateNextPrefix(maxSeq, now);
-    return res.status(200).json({
-      success: true,
-      message: "Next prefix generated",
-      data: { yearMonth, lastSequence: maxSeq, nextPrefix },
-    });
-  } catch (e: any) {
-    return res.status(500).json({ success: false, message: e?.message || "Failed to generate next prefix" });
-  }
-};
-
-export const getTagBatchByPrefix = async (req: Request, res: Response) => {
-  try {
-    const prefix = String(req.params.prefix || "").trim().toUpperCase();
-    if (!/^\d{2}[A-L]\d{2}$/.test(prefix)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid prefix format. Expected YYMNN (example: 26B03).",
-      });
-    }
-
-    const includeTags = String(req.query.includeTags || "true").toLowerCase() !== "false";
+    const prefix = String(req.query.prefix || "").trim().toUpperCase();
+    const codeCompact = String(req.query.codeCompact || "").trim().toUpperCase();
     const page = Math.max(1, Number(req.query.page || 1));
     const limit = Math.min(1000, Math.max(1, Number(req.query.limit || 100)));
     const skip = (page - 1) * limit;
 
-    const batch = await prisma.tagBatch.findUnique({
-      where: { prefix },
-      select: {
-        id: true,
-        prefix: true,
-        yearMonth: true,
-        sequence: true,
-        quantity: true,
-        notes: true,
-        generatedAt: true,
-        createdAt: true,
-        _count: { select: { tags: true } },
-      },
-    });
+    const where: Prisma.TagWhereInput = {};
 
-    if (!batch) {
-      return res.status(404).json({
-        success: false,
-        message: "Tag batch not found",
-        data: null,
-      });
-    }
+    // if (codeCompact) {
+    //   const parsed = createTagGenerator().parseCode(codeCompact);
+    //   if (!parsed.isValid || !parsed.codeCompact) {
+    //     return res.status(400).json({
+    //       success: false,
+    //       message: parsed.error || "Invalid codeCompact",
+    //     });
+    //   }
+    //   where.codeCompact = parsed.codeCompact;
+    // } else if (prefix) {
+    //   if (!/^\d{2}[A-L]\d{2}$/.test(prefix)) {
+    //     return res.status(400).json({
+    //       success: false,
+    //       message: "Invalid prefix format. Expected YYMNN (example: 26B03).",
+    //     });
+    //   }
 
-    const tags = includeTags
-      ? await prisma.tag.findMany({
-        where: { batchId: batch.id },
-        orderBy: { sequence: "asc" },
+    //   const batch = await prisma.tagBatch.findUnique({
+    //     where: { prefix },
+    //     select: { id: true },
+    //   });
+
+    //   if (!batch) {
+    //     return res.status(404).json({
+    //       success: false,
+    //       message: "Tag batch not found",
+    //       data: [],
+    //     });
+    //   }
+    //   where.batchId = batch.id;
+    // }
+
+    const [total, tags] = await Promise.all([
+      prisma.tag.count({ where }),
+      prisma.tag.findMany({
+        where,
+        orderBy: { id: "desc" },
         skip,
         take: limit,
         select: {
-          sequence: true,
+          id: true,
           code: true,
           codeCompact: true,
           qrPayload: true,
-          isAssigned: true,
-          assignedDog: true,
-          assignedAt: true,
         },
-      })
-      : [];
+      }),
+    ]);
+
+    const imageBase = `${req.protocol}://${req.get("host")}${req.baseUrl}`;
+    const data = tags.map((tag) => ({
+      sequence: tag.id,
+      code: tag.code,
+      codeCompact: tag.codeCompact,
+      qrPayload: tag.qrPayload,
+      qrImageUrl: `${imageBase}/tag/image/${encodeURIComponent(tag.codeCompact)}`,
+    }));
 
     return res.status(200).json({
       success: true,
-      message: "Tag batch fetched",
-      data: {
-        batch: {
-          prefix: batch.prefix,
-          yearMonth: batch.yearMonth,
-          sequence: batch.sequence,
-          quantity: batch.quantity,
-          notes: batch.notes,
-          generatedAt: batch.generatedAt,
-          createdAt: batch.createdAt,
-        },
-        tags,
-        pagination: includeTags
-          ? {
-            page,
-            limit,
-            total: batch._count.tags,
-            totalPages: Math.max(1, Math.ceil(batch._count.tags / limit)),
-          }
-          : null,
+      message: "Tags fetched successfully",
+      data,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
       },
     });
   } catch (e: any) {
     return res.status(500).json({
       success: false,
-      message: e?.message || "Failed to fetch tag batch",
+      message: e?.message || "Failed to fetch tags",
     });
   }
 };
 
-export const getTagByCodeCompact = async (req: Request, res: Response) => {
-  try {
-    const codeCompact = String(req.params.codeCompact || "").trim().toUpperCase();
-    const parsed = createTagGenerator().parseCode(codeCompact);
-    if (!parsed.isValid || !parsed.codeCompact) {
-      return res.status(400).json({
-        success: false,
-        message: parsed.error || "Invalid codeCompact",
-      });
-    }
-
-    const tag = await prisma.tag.findUnique({
-      where: { codeCompact: parsed.codeCompact },
-      select: {
-        id: true,
-        sequence: true,
-        code: true,
-        codeCompact: true,
-        qrPayload: true,
-        isAssigned: true,
-        assignedDog: true,
-        assignedAt: true,
-        batch: {
-          select: {
-            id: true,
-            prefix: true,
-            yearMonth: true,
-            sequence: true,
-            quantity: true,
-            batchSeed: true,
-            primeMultiplier: true,
-            notes: true,
-            generatedAt: true,
-          },
-        },
-      },
-    });
-
-    if (!tag) {
-      return res.status(404).json({
-        success: false,
-        message: "Tag not found",
-        data: null,
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Tag fetched",
-      data: [{
-        tag: {
-          id: tag.id,
-          sequence: tag.sequence,
-          code: tag.code,
-          codeCompact: tag.codeCompact,
-          qrPayload: tag.qrPayload,
-          isAssigned: tag.isAssigned,
-          assignedDog: tag.assignedDog,
-          assignedAt: tag.assignedAt,
-        },
-        batch: tag.batch,
-      }],
-    });
-  } catch (e: any) {
-    return res.status(500).json({
-      success: false,
-      message: e?.message || "Failed to fetch tag",
-    });
-  }
-};
-
-export const getScanInfo = async (req: Request, res: Response) => {
-  const code = String(req.query.code || "");
-  if (!code) return res.status(400).json({ message: "code required" });
-
-  try {
-    const dog = await prisma.dog.findUnique({
-      where: { qrCode: code },
-    });
-
-    if (!dog) {
-      return res.status(404).json({
-        success: false,
-        message: "Dog not found",
-        data: [],
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Dog found",
-      data: [dog],
-    });
-  } catch (error) {
-    console.error(error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to get scan info",
-      data: [],
-    });
-  }
-};
 
 export const assignScannedCodeToDog = async (req: Request, res: Response) => {
   const code = String(req.body.code || "");
@@ -1057,10 +769,15 @@ export const assignScannedCodeToDog = async (req: Request, res: Response) => {
     if (!dog || dog.status === STATUS_DELETED) return res.status(404).json({ message: "Dog not found" });
 
     return res.status(409).json({
+      success: false,
       message: "This dog already has a QR assigned and it cannot be changed",
-      dogId: dog.id,
-      dogUniqueId: dog.tempId,
-      existingQrCode: dog.qrCode,
+      data: [
+        {
+          dogId: dog.id,
+          dogUniqueId: dog.tempId,
+          existingQrCode: dog.qrCode,
+        }
+      ]
     });
   }
 
@@ -1077,10 +794,14 @@ export const assignScannedCodeToDog = async (req: Request, res: Response) => {
   });
 
   return res.status(200).json({
+    success: true,
     message: "QR assigned successfully",
-    dogId: dog!.id,
-    dogUniqueId: dog!.tempId,
-    qrCode: dog!.qrCode,
+    data: [
+      {
+        dogId: dog!.id,
+        dogUniqueId: dog!.tempId,
+        qrCode: dog!.qrCode,
+      }
+    ]
   });
 };
-

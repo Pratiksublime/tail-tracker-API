@@ -1,5 +1,5 @@
 
-import { PhotoType } from "@prisma/client";
+import { PhotoType, Prisma } from "@prisma/client";
 import { Request, Response } from "express";
 import { UploadedFile } from "express-fileupload";
 import fs from "fs";
@@ -8,10 +8,26 @@ import { v4 as uuidv4 } from "uuid";
 import { prisma } from "../../../lib/prisma";
 import { parseCoordinates, parseOptionalInt } from "../../../utils/parseHelper";
 import { validate } from "../../../utils/validator";
+
+
 // import { redisClient } from "../../../lib/redis";
 
 const STATUS_ACTIVE = Number(process.env.STATUS_ACTIVE);
 const STATUS_DELETED = Number(process.env.STATUS_DELETED);
+const ADMIN_INTAKE_ROLES = new Set(["SHELTER_STAFF", "SHELTER_MANAGER", "NGO_ADMIN", "GOVT_ADMIN", "SUPER_ADMIN"]);
+const PHOTO_BASE_URL = String(
+    process.env.PHOTO_BASE_URL || process.env.COMPANY_WEBSITE_URL || ""
+).replace(/\/$/, "");
+
+const withEnvPhotoBaseUrl = (photoUrl: string | null | undefined) => {
+    if (!photoUrl) return photoUrl || null;
+    if (!PHOTO_BASE_URL) return photoUrl;
+
+    // keep path, swap host/base to env-configured base URL
+    const match = photoUrl.match(/(\/uploads\/dogs\/.+)$/);
+    if (match?.[1]) return `${PHOTO_BASE_URL}${match[1]}`;
+    return photoUrl;
+};
 
 export const capture = async (req: Request, res: Response): Promise<void> => {
     const { userId, role } = (req as any).tokenData
@@ -799,6 +815,1014 @@ export const batchIntake = async (req: Request, res: Response): Promise<void> =>
         });
     }
 }
+
+export const batchRescueIntake = async (req: Request, res: Response): Promise<void> => {
+    const { userId, role, shelterId: tokenShelterId } = (req as any).tokenData || {};
+    const payload = (req.body && typeof req.body === "object") ? req.body : {};
+    console.log("payload", payload);
+    const rawCandidates = (payload as any).dogs ?? (payload as any).items ?? (payload as any).data;
+
+    let records: any[] = [];
+    if (Array.isArray(rawCandidates)) {
+        records = rawCandidates;
+    } else if (typeof rawCandidates === "string") {
+        try {
+            const parsed = JSON.parse(rawCandidates);
+            records = Array.isArray(parsed) ? parsed : [];
+        } catch {
+            records = [];
+        }
+    }
+
+    if (role !== "FIELD_TECH") {
+        res.status(403).json({ success: false, message: "Forbidden", data: [] });
+        return;
+    }
+
+    if (!records.length) {
+        res.status(422).json({
+            success: false,
+            message: "Validation failed",
+            data: { dogs: ["Provide a non-empty dogs/items/data array."] },
+        });
+        return;
+    }
+
+    const filesBag = (req.files && typeof req.files === "object")
+        ? (req.files as Record<string, unknown>)
+        : {};
+    const fileKeys = Object.keys(filesBag);
+    const imageMimeTypes = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
+    const uploadDir = path.join(process.cwd(), "public", "uploads", "dogs");
+    fs.mkdirSync(uploadDir, { recursive: true });
+
+    const explicitShelterId = parseOptionalInt((payload as any).shelterId);
+    // let fallbackShelterId = explicitShelterId ?? parseOptionalInt(tokenShelterId);
+    // if (fallbackShelterId === null) {
+    //     const shelter = await prisma.shelter.findFirst({
+    //         where: { status: { not: STATUS_DELETED } },
+    //         orderBy: { id: "asc" },
+    //         select: { id: true },
+    //     });
+    //     fallbackShelterId = shelter?.id ?? null;
+    // }
+
+    // if (fallbackShelterId === null) {
+    //     res.status(422).json({
+    //         success: false,
+    //         message: "Validation failed",
+    //         data: { shelterId: ["No active shelter found. Provide shelterId in request body."] },
+    //     });
+    //     return;
+    // }
+
+    const findIndexedFile = (index: number): UploadedFile | null => {
+        const candidates = [
+            `photo_${index}`,
+            `image_${index}`,
+            `dogPhoto_${index}`,
+            `dogImage_${index}`,
+            `photo[${index}]`,
+            `image[${index}]`,
+            `dogPhoto[${index}]`,
+            `dogImage[${index}]`,
+        ];
+
+        for (const key of candidates) {
+            const val = filesBag[key];
+            if (!val) continue;
+            if (Array.isArray(val)) return (val[0] as UploadedFile) || null;
+            return val as UploadedFile;
+        }
+
+        const photosAny = filesBag.photos;
+        if (Array.isArray(photosAny) && photosAny[index]) return photosAny[index] as UploadedFile;
+        if (Array.isArray(filesBag.photo) && (filesBag.photo as unknown[])[index]) return (filesBag.photo as unknown[])[index] as UploadedFile;
+
+        const matchedDynamicKey = fileKeys.find((k) => {
+            const m = k.match(/(?:photo|image|dogphoto|dogimage)[_\[]?(\d+)\]?$/i);
+            return !!m && Number(m[1]) === index;
+        });
+        if (matchedDynamicKey) {
+            const val = filesBag[matchedDynamicKey];
+            if (Array.isArray(val)) return (val[0] as UploadedFile) || null;
+            return val as UploadedFile;
+        }
+
+        return null;
+    };
+
+    const savePhoto = async (index: number, item: any): Promise<string | null> => {
+        const itemBase64 = [item.photoBase64, item.imageBase64, item.photosBase64]
+            .flat()
+            .find((v) => typeof v === "string" && String(v).trim() !== "") as string | undefined;
+        const indexedFile = findIndexedFile(index);
+
+        if (!itemBase64 && !indexedFile) return null;
+
+        if (indexedFile) {
+            if (!imageMimeTypes.has(indexedFile.mimetype)) {
+                throw new Error(`Unsupported file type: ${indexedFile.mimetype}`);
+            }
+            const extension = path.extname(indexedFile.name || "").toLowerCase() || ".jpg";
+            const generatedName = `${uuidv4()}${extension}`;
+            const absolutePath = path.join(uploadDir, generatedName);
+            await indexedFile.mv(absolutePath);
+            return `${req.protocol}://${req.get("host")}/uploads/dogs/${generatedName}`;
+        }
+
+        const encoded = String(itemBase64);
+        const matched = encoded.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+        const mimeType = matched?.[1] || "image/jpeg";
+        const base64Data = matched?.[2] || encoded;
+
+        if (!imageMimeTypes.has(mimeType)) {
+            throw new Error(`Unsupported base64 image type: ${mimeType}`);
+        }
+
+        const extension = mimeType === "image/png"
+            ? ".png"
+            : mimeType === "image/webp"
+                ? ".webp"
+                : ".jpg";
+        const generatedName = `${uuidv4()}${extension}`;
+        const absolutePath = path.join(uploadDir, generatedName);
+        fs.writeFileSync(absolutePath, Buffer.from(base64Data, "base64"));
+        return `${req.protocol}://${req.get("host")}/uploads/dogs/${generatedName}`;
+    };
+
+    const successItems: Array<{ index: number; id: number; mode: "existing" | "new"; tempId?: string; qrCode?: string; photoUrl: string }> = [];
+    const failedItems: Array<{ index: number; tempId?: string | null; qrCode?: string | null; reason: string }> = [];
+
+    for (let index = 0; index < records.length; index++) {
+        const item = records[index] || {};
+        const qrCode = item?.qrCode ? String(item.qrCode).trim() : "";
+        const tempId = item?.tempId ? String(item.tempId).trim() : "";
+        const parsedLocation = parseCoordinates(item.rescueLocation, null, null);
+
+        if (parsedLocation === null) {
+            failedItems.push({ index, tempId: tempId || null, qrCode: qrCode || null, reason: "Invalid rescueLocation" });
+            continue;
+        }
+
+        // Strict identity rule: exactly one of tempId or qrCode is required.
+        if ((!tempId && !qrCode) || (tempId && qrCode)) {
+            failedItems.push({
+                index,
+                tempId: tempId || null,
+                qrCode: qrCode || null,
+                reason: "Provide exactly one identity: tempId (new dog) OR qrCode (existing dog)",
+            });
+            continue;
+        }
+
+        try {
+            const photoUrl = await savePhoto(index, item);
+            if (!photoUrl) {
+                failedItems.push({ index, tempId: tempId || null, qrCode: qrCode || null, reason: "Photo is required (single photo per dog)" });
+                continue;
+            }
+
+            if (qrCode) {
+                const existingDog = await prisma.dog.findFirst({
+                    where: { qrCode, status: { not: STATUS_DELETED } },
+                    select: { id: true },
+                });
+
+                if (!existingDog) {
+                    failedItems.push({ index, qrCode, reason: "Dog not found for qrCode" });
+                    continue;
+                }
+
+                await prisma.$executeRaw`
+                    UPDATE dogs
+                    SET rescue_location = ST_SetSRID(ST_MakePoint(${parsedLocation.longitude}, ${parsedLocation.latitude}), 4326),
+                        rescue_address = ${item.rescueAddress ?? null},
+                        updated_at = NOW(),
+                        lifecycle_state = ${"IN_TRANSIT"}::"LifecycleState",
+                        lifecycle_phase = ${"INTAKE_IDENTIFICATION"}::"LifecyclePhase"
+                    WHERE id = ${existingDog.id};
+                `;
+
+                await prisma.dogPhoto.create({
+                    data: {
+                        dogId: existingDog.id,
+                        photoUrl,
+                        photoType: PhotoType.OTHER,
+                        isPrimary: true,
+                        capturedAt: new Date(),
+                    },
+                });
+
+                successItems.push({ index, id: existingDog.id, mode: "existing", qrCode, photoUrl });
+                continue;
+            }
+
+            const duplicateTempId = await prisma.dog.findFirst({
+                where: { tempId, status: { not: STATUS_DELETED } },
+                select: { id: true },
+            });
+            if (duplicateTempId) {
+                failedItems.push({
+                    index,
+                    tempId,
+                    reason: "tempId already exists. For existing dog, send qrCode instead of tempId",
+                });
+                continue;
+            }
+
+            const inserted = await prisma.$queryRaw<Array<{ id: number }>>`
+                INSERT INTO "dogs" (
+                    "temp_id","rfid_tag","shelter_id","profile_status","lifecycle_state","lifecycle_phase",
+                    "estimated_age","sex","breed","color","distinguishing_marks","intake_condition",
+                    "behavioral_notes","rescue_location","rescue_address","intake_by","is_sterilized","status",
+                    "created_at","updated_at"
+                ) VALUES (
+                    ${tempId},${null},${null},${"TEMPORARY"}::"ProfileStatus",${"IN_TRANSIT"}::"LifecycleState",
+                    ${"INTAKE_IDENTIFICATION"}::"LifecyclePhase",${null},${"UNKNOWN"}::"AnimalSex",${null},${null},${null},
+                    ${"HEALTHY"}::"IntakeCondition",${null},
+                    ST_SetSRID(ST_MakePoint(${parsedLocation.longitude}, ${parsedLocation.latitude}), 4326),
+                    ${item.rescueAddress ?? null},${userId},${false},${STATUS_ACTIVE || 1},NOW(),NOW()
+                ) RETURNING id
+            `;
+
+            const createdDogId = inserted[0]?.id;
+            if (!createdDogId) {
+                failedItems.push({ index, tempId, reason: "Failed to create dog record" });
+                continue;
+            }
+
+            await prisma.dogPhoto.create({
+                data: {
+                    dogId: createdDogId,
+                    photoUrl,
+                    photoType: PhotoType.OTHER,
+                    isPrimary: true,
+                    capturedAt: new Date(),
+                },
+            });
+
+            successItems.push({ index, id: createdDogId, mode: "new", tempId, photoUrl });
+        } catch (error: any) {
+            failedItems.push({
+                index,
+                tempId: tempId || null,
+                qrCode: qrCode || null,
+                reason: error?.message || "Database error",
+            });
+        }
+    }
+
+    res.status(failedItems.length ? 207 : 201).json({
+        success: failedItems.length === 0,
+        message: failedItems.length ? "Batch rescue intake completed with partial failures" : "Batch rescue intake completed successfully",
+        data: {
+            summary: {
+                total: records.length,
+                processed: successItems.length + failedItems.length,
+                successCount: successItems.length,
+                failedCount: failedItems.length,
+            },
+            successItems,
+            failedItems,
+        },
+    });
+}
+export const transferCapturedDogs = async (req: Request, res: Response): Promise<void> => {
+    const { userId, role, shelterId: tokenShelterId } = (req as any).tokenData || {};
+    const payload = (req.body && typeof req.body === "object") ? req.body : {};
+    const rawCandidates = (payload as any).dogs ?? (payload as any).items ?? (payload as any).data;
+
+    let records: any[] = [];
+    if (Array.isArray(rawCandidates)) {
+        records = rawCandidates;
+    } else if (typeof rawCandidates === "string") {
+        try {
+            const parsed = JSON.parse(rawCandidates);
+            records = Array.isArray(parsed) ? parsed : [];
+        } catch {
+            records = [];
+        }
+    }
+
+    if (role !== "FIELD_TECH") {
+        res.status(403).json({ success: false, message: "Forbidden", data: [] });
+        return;
+    }
+
+    if (!records.length) {
+        res.status(422).json({
+            success: false,
+            message: "Validation failed",
+            data: { dogs: ["Provide a non-empty dogs/items/data array."] },
+        });
+        return;
+    }
+
+    const filesBag = (req.files && typeof req.files === "object")
+        ? (req.files as Record<string, unknown>)
+        : {};
+    const fileKeys = Object.keys(filesBag);
+    const imageMimeTypes = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
+    const uploadDir = path.join(process.cwd(), "public", "uploads", "dogs");
+    fs.mkdirSync(uploadDir, { recursive: true });
+
+    const explicitShelterId = parseOptionalInt((payload as any).shelterId);
+    // let fallbackShelterId = explicitShelterId ?? parseOptionalInt(tokenShelterId);
+    // if (fallbackShelterId === null) {
+    //     const shelter = await prisma.shelter.findFirst({
+    //         where: { status: { not: STATUS_DELETED } },
+    //         orderBy: { id: "asc" },
+    //         select: { id: true },
+    //     });
+    //     fallbackShelterId = shelter?.id ?? null;
+    // }
+    // if (fallbackShelterId === null) {
+    //     res.status(422).json({
+    //         success: false,
+    //         message: "Validation failed",
+    //         data: { shelterId: ["No active shelter found. Provide shelterId in request body."] },
+    //     });
+    //     return;
+    // }
+
+    const findIndexedFile = (index: number): UploadedFile | null => {
+        const candidates = [
+            `photo_${index}`,
+            `image_${index}`,
+            `dogPhoto_${index}`,
+            `dogImage_${index}`,
+            `photo[${index}]`,
+            `image[${index}]`,
+            `dogPhoto[${index}]`,
+            `dogImage[${index}]`,
+        ];
+        for (const key of candidates) {
+            const val = filesBag[key];
+            if (!val) continue;
+            if (Array.isArray(val)) return (val[0] as UploadedFile) || null;
+            return val as UploadedFile;
+        }
+        const photosAny = filesBag.photos;
+        if (Array.isArray(photosAny) && photosAny[index]) return photosAny[index] as UploadedFile;
+        if (Array.isArray(filesBag.photo) && (filesBag.photo as unknown[])[index]) return (filesBag.photo as unknown[])[index] as UploadedFile;
+        const matchedDynamicKey = fileKeys.find((k) => {
+            const m = k.match(/(?:photo|image|dogphoto|dogimage)[_\[]?(\d+)\]?$/i);
+            return !!m && Number(m[1]) === index;
+        });
+        if (matchedDynamicKey) {
+            const val = filesBag[matchedDynamicKey];
+            if (Array.isArray(val)) return (val[0] as UploadedFile) || null;
+            return val as UploadedFile;
+        }
+        return null;
+    };
+
+    const storeDogPhoto = async (index: number, item: any): Promise<string | null> => {
+        const itemBase64 = [item.photoBase64, item.imageBase64, item.photosBase64]
+            .flat()
+            .find((v) => typeof v === "string" && String(v).trim() !== "") as string | undefined;
+        const indexedFile = findIndexedFile(index);
+
+        if (!itemBase64 && !indexedFile) return null;
+
+        if (indexedFile) {
+            if (!imageMimeTypes.has(indexedFile.mimetype)) {
+                throw new Error(`Unsupported file type: ${indexedFile.mimetype}`);
+            }
+            const extension = path.extname(indexedFile.name || "").toLowerCase() || ".jpg";
+            const generatedName = `${uuidv4()}${extension}`;
+            const absolutePath = path.join(uploadDir, generatedName);
+            await indexedFile.mv(absolutePath);
+            return `${req.protocol}://${req.get("host")}/uploads/dogs/${generatedName}`;
+        }
+
+        const encoded = String(itemBase64);
+        const matched = encoded.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+        const mimeType = matched?.[1] || "image/jpeg";
+        const base64Data = matched?.[2] || encoded;
+        if (!imageMimeTypes.has(mimeType)) {
+            throw new Error(`Unsupported base64 image type: ${mimeType}`);
+        }
+        const extension = mimeType === "image/png"
+            ? ".png"
+            : mimeType === "image/webp"
+                ? ".webp"
+                : ".jpg";
+        const generatedName = `${uuidv4()}${extension}`;
+        const absolutePath = path.join(uploadDir, generatedName);
+        fs.writeFileSync(absolutePath, Buffer.from(base64Data, "base64"));
+        return `${req.protocol}://${req.get("host")}/uploads/dogs/${generatedName}`;
+    };
+
+    const successItems: Array<{ index: number; id: number; mode: "known" | "unknown"; tempId?: string; qrCode?: string; photoUrl?: string }> = [];
+    const failedItems: Array<{ index: number; tempId?: string | null; qrCode?: string | null; reason: string }> = [];
+
+    for (let index = 0; index < records.length; index++) {
+        const item = records[index] || {};
+        const qrCode = item?.qrCode ? String(item.qrCode).trim() : "";
+        const tempId = item?.tempId ? String(item.tempId) : `TMP-${Date.now()}-${index}-${uuidv4().slice(0, 8)}`;
+        const parsedLocation = parseCoordinates(item.rescueLocation, null, null);
+
+        if (parsedLocation === null) {
+            failedItems.push({ index, tempId: item?.tempId || null, qrCode: qrCode || null, reason: "Invalid rescueLocation" });
+            continue;
+        }
+
+        try {
+            const storedPhotoUrl = await storeDogPhoto(index, item);
+            if (!storedPhotoUrl) {
+                failedItems.push({ index, tempId, qrCode: qrCode || null, reason: "Photo is required (single photo per dog)" });
+                continue;
+            }
+
+            if (qrCode) {
+                const knownDog = await prisma.dog.findFirst({
+                    where: { qrCode, status: { not: STATUS_DELETED } },
+                    select: { id: true },
+                });
+                if (!knownDog) {
+                    failedItems.push({ index, tempId: null, qrCode, reason: "QR dog not found" });
+                    continue;
+                }
+
+                await prisma.$executeRaw`
+                    UPDATE dogs
+                    SET rescue_location = ST_SetSRID(ST_MakePoint(${parsedLocation.longitude}, ${parsedLocation.latitude}), 4326),
+                        rescue_address = ${item.rescueAddress ?? null},
+                        updated_at = NOW()
+                    WHERE id = ${knownDog.id};
+                `;
+
+                await prisma.dogPhoto.create({
+                    data: {
+                        dogId: knownDog.id,
+                        photoUrl: storedPhotoUrl,
+                        photoType: PhotoType.OTHER,
+                        isPrimary: true,
+                        capturedAt: new Date(),
+                    },
+                });
+
+                successItems.push({ index, id: knownDog.id, mode: "known", qrCode, photoUrl: storedPhotoUrl });
+                continue;
+            }
+
+            // const shelterId = parseOptionalInt(item.shelterId) ?? fallbackShelterId;
+            const inserted = await prisma.$queryRaw<Array<{ id: number }>>`
+                INSERT INTO "dogs" (
+                    "temp_id","rfid_tag","shelter_id","profile_status","lifecycle_state","lifecycle_phase",
+                    "estimated_age","sex","breed","color","distinguishing_marks","intake_condition",
+                    "behavioral_notes","rescue_location","rescue_address","intake_by","is_sterilized","status",
+                    "created_at","updated_at"
+                ) VALUES (
+                    ${tempId},${null},${null},${"TEMPORARY"}::"ProfileStatus",${"AWAITING_IDENTIFICATION"}::"LifecycleState",
+                    ${"INTAKE_IDENTIFICATION"}::"LifecyclePhase",${null},${"UNKNOWN"}::"AnimalSex",${item.breed ?? null},
+                    ${item.color ?? null},${null},${"HEALTHY"}::"IntakeCondition",${null},
+                    ST_SetSRID(ST_MakePoint(${parsedLocation.longitude}, ${parsedLocation.latitude}), 4326),
+                    ${item.rescueAddress ?? null},${userId},${false},${STATUS_ACTIVE || 1},NOW(),NOW()
+                ) RETURNING id
+            `;
+            const createdDogId = inserted[0]?.id;
+            if (!createdDogId) {
+                failedItems.push({ index, tempId, reason: "Failed to create dog record" });
+                continue;
+            }
+
+            await prisma.dogPhoto.create({
+                data: {
+                    dogId: createdDogId,
+                    photoUrl: storedPhotoUrl,
+                    photoType: PhotoType.OTHER,
+                    isPrimary: true,
+                    capturedAt: new Date(),
+                },
+            });
+
+            successItems.push({ index, id: createdDogId, mode: "unknown", tempId, photoUrl: storedPhotoUrl });
+        } catch (error: any) {
+            failedItems.push({
+                index,
+                tempId,
+                qrCode: qrCode || null,
+                reason: error?.message || "Database error",
+            });
+        }
+    }
+
+    res.status(failedItems.length ? 207 : 201).json({
+        success: failedItems.length === 0,
+        message: failedItems.length ? "Transfer completed with partial failures" : "Transfer completed successfully",
+        data: {
+            summary: {
+                total: records.length,
+                successCount: successItems.length,
+                failedCount: failedItems.length,
+            },
+            successItems,
+            failedItems,
+        },
+    });
+}
+
+export const updateDogProcessingStatus = async (req: Request, res: Response): Promise<void> => {
+    const { userId, role } = (req as any).tokenData || {};
+    const payload = (req.body && typeof req.body === "object") ? req.body : {};
+    const dogId = parseOptionalInt((payload as any).dogId);
+
+    if (!ADMIN_INTAKE_ROLES.has(String(role || ""))) {
+        res.status(403).json({ success: false, message: "Forbidden", data: [] });
+        return;
+    }
+
+    if (dogId === null) {
+        res.status(422).json({
+            success: false,
+            message: "Validation failed",
+            data: { dogId: ["dogId is required and must be integer"] },
+        });
+        return;
+    }
+
+    try {
+        const dog = await prisma.dog.findFirst({
+            where: { id: dogId, status: { not: STATUS_DELETED } },
+            select: {
+                id: true,
+                tempId: true,
+                qrCode: true,
+                qrAssignedAt: true,
+                isSterilized: true,
+                behavioralNotes: true,
+                lifecycleState: true,
+                lifecyclePhase: true,
+            },
+        });
+
+        if (!dog) {
+            res.status(404).json({ success: false, message: "Dog not found", data: [] });
+            return;
+        }
+
+        const qrCodeRaw = (payload as any).qrCode;
+        const qrCode = typeof qrCodeRaw === "string" ? qrCodeRaw.trim() : "";
+        const hasSterilized = Object.prototype.hasOwnProperty.call(payload, "isSterilized");
+        const isSterilized = hasSterilized
+            ? String((payload as any).isSterilized).toLowerCase() === "true" || (payload as any).isSterilized === true
+            : undefined;
+
+        const vaccinationDone = Object.prototype.hasOwnProperty.call(payload, "vaccinationDone")
+            ? (String((payload as any).vaccinationDone).toLowerCase() === "true" || (payload as any).vaccinationDone === true)
+            : undefined;
+        const vaccinationDate = (payload as any).vaccinationDate ? String((payload as any).vaccinationDate) : null;
+        const vaccinationNotes = (payload as any).vaccinationNotes ? String((payload as any).vaccinationNotes) : null;
+        const sterilizationDate = (payload as any).sterilizationDate ? String((payload as any).sterilizationDate) : null;
+        const sterilizationNotes = (payload as any).sterilizationNotes ? String((payload as any).sterilizationNotes) : null;
+
+        const markReadyForRelease = String((payload as any).markReadyForRelease || "false").toLowerCase() === "true";
+        const lifecycleStateInput = (payload as any).lifecycleState ? String((payload as any).lifecycleState) : null;
+
+        const updateData: any = {
+            updatedAt: new Date(),
+        };
+
+        if (qrCode) {
+            const existingWithQr = await prisma.dog.findFirst({
+                where: { qrCode, id: { not: dogId }, status: { not: STATUS_DELETED } },
+                select: { id: true, tempId: true },
+            });
+            if (existingWithQr) {
+                res.status(409).json({
+                    success: false,
+                    message: "qrCode is already assigned to another dog",
+                    data: [{ dogId: existingWithQr.id, tempId: existingWithQr.tempId }],
+                });
+                return;
+            }
+            updateData.qrCode = qrCode;
+            updateData.qrAssignedAt = new Date();
+        }
+
+        if (hasSterilized && typeof isSterilized === "boolean") {
+            updateData.isSterilized = isSterilized;
+        }
+
+        const medicalLines: string[] = [];
+        if (typeof vaccinationDone === "boolean") {
+            medicalLines.push(`Vaccination: ${vaccinationDone ? "DONE" : "PENDING"}${vaccinationDate ? ` (${vaccinationDate})` : ""}`);
+        }
+        if (vaccinationNotes) medicalLines.push(`Vaccination Notes: ${vaccinationNotes}`);
+        if (sterilizationDate || sterilizationNotes) {
+            medicalLines.push(`Sterilization: ${sterilizationDate ? `DONE (${sterilizationDate})` : "UPDATED"}`);
+            if (sterilizationNotes) medicalLines.push(`Sterilization Notes: ${sterilizationNotes}`);
+        }
+
+        if (medicalLines.length > 0) {
+            const prefix = `[Processing Update by User ${userId} at ${new Date().toISOString()}]`;
+            const block = `${prefix}\n${medicalLines.join("\n")}`;
+            updateData.behavioralNotes = dog.behavioralNotes
+                ? `${dog.behavioralNotes}\n\n${block}`
+                : block;
+        }
+
+        if (markReadyForRelease) {
+            updateData.lifecycleState = "READY_FOR_RELEASE";
+            updateData.lifecyclePhase = "FINAL_DISPOSITION";
+        } else if (lifecycleStateInput) {
+            updateData.lifecycleState = lifecycleStateInput;
+        }
+
+        const updated = await prisma.dog.update({
+            where: { id: dogId },
+            data: updateData,
+        });
+
+        res.status(200).json({
+            success: true,
+            message: "Dog processing status updated",
+            data: [updated],
+        });
+    } catch (error: any) {
+        res.status(500).json({
+            success: false,
+            message: error?.message || "Failed to update dog processing status",
+            data: [],
+        });
+    }
+}
+
+export const releaseList = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const shelterId = parseOptionalInt(req.query.shelterId);
+        const includePhotos = String(req.query.includePhotos || "true").toLowerCase() !== "false";
+        const dogs = await prisma.dog.findMany({
+            where: {
+                status: { not: STATUS_DELETED },
+                lifecycleState: "READY_FOR_RELEASE",
+                // ...(shelterId !== null ? { shelterId } : {}),
+            },
+            orderBy: { updatedAt: "desc" },
+            include: includePhotos
+                ? {
+                    photos: {
+                        orderBy: { capturedAt: "desc" },
+                        take: 1,
+                    },
+                }
+                : undefined,
+        });
+
+        const ids = dogs.map((d: any) => d.id);
+        const geoMap = new Map<number, { latitude: number | null; longitude: number | null }>();
+        if (ids.length > 0) {
+            const geoRows = await prisma.$queryRaw<Array<{ id: number; latitude: number | null; longitude: number | null }>>(
+                Prisma.sql`
+                            SELECT
+                                id,
+                                ST_Y(rescue_location::geometry) AS latitude,
+                                ST_X(rescue_location::geometry) AS longitude
+                            FROM dogs
+                            WHERE id IN (${Prisma.join(ids)})
+                        `
+            );
+
+            geoRows.forEach((row) => {
+                geoMap.set(row.id, {
+                    latitude: row.latitude !== null ? Number(row.latitude) : null,
+                    longitude: row.longitude !== null ? Number(row.longitude) : null,
+                });
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: "Release list fetched",
+            data: dogs.map((d: any) => ({
+                id: d.id,
+                tempId: d.tempId,
+                qrCode: d.qrCode,
+                shelterId: d.shelterId,
+                lifecycleState: d.lifecycleState,
+                lifecyclePhase: d.lifecyclePhase,
+                isSterilized: d.isSterilized,
+                rescueLocation: geoMap.has(d.id) ? geoMap.get(d.id) : null,
+                rescueAddress: d.rescueAddress,
+                updatedAt: d.updatedAt,
+                latestPhoto: includePhotos
+                    ? (d.photos?.[0]
+                        ? { ...d.photos[0], photoUrl: withEnvPhotoBaseUrl(d.photos[0].photoUrl) }
+                        : null)
+                    : null,
+            })),
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "Failed to fetch release list", data: [] });
+    }
+}
+
+export const releaseDogs = async (req: Request, res: Response): Promise<void> => {
+    const { role } = (req as any).tokenData || {};
+    // if (role !== "FIELD_TECH") {
+    //     res.status(403).json({ success: false, message: "Forbidden", data: [] });
+    //     return;
+    // }
+
+    const payload = (req.body && typeof req.body === "object") ? req.body : {};
+    const items = Array.isArray((payload as any).items)
+        ? (payload as any).items
+        : (payload as any).dogId !== undefined
+            ? [payload]
+            : [];
+
+    if (!items.length) {
+        res.status(422).json({
+            success: false,
+            message: "Validation failed",
+            data: { items: ["Provide items[] or single payload with dogId + releaseLocation"] },
+        });
+        return;
+    }
+
+    const successItems: Array<{ index: number; dogId: number }> = [];
+    const failedItems: Array<{ index: number; dogId?: number; reason: string }> = [];
+
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i] || {};
+        const dogId = parseOptionalInt(item.dogId);
+        const parsedLocation = parseCoordinates(item.releaseLocation ?? item.rescueLocation, null, null);
+
+        if (dogId === null) {
+            failedItems.push({ index: i, reason: "Invalid dogId" });
+            continue;
+        }
+        if (parsedLocation === null) {
+            failedItems.push({ index: i, dogId, reason: "Invalid releaseLocation" });
+            continue;
+        }
+
+        try {
+            const existing = await prisma.dog.findFirst({
+                where: { id: dogId, status: { not: STATUS_DELETED } },
+                select: { id: true },
+            });
+            if (!existing) {
+                failedItems.push({ index: i, dogId, reason: "Dog not found" });
+                continue;
+            }
+
+            await prisma.$executeRaw`
+                UPDATE dogs
+                SET lifecycle_state = ${"RELEASED"}::"LifecycleState",
+                    lifecycle_phase = ${"FINAL_DISPOSITION"}::"LifecyclePhase",
+                    rescue_location = ST_SetSRID(ST_MakePoint(${parsedLocation.longitude}, ${parsedLocation.latitude}), 4326),
+                    rescue_address = ${item.releaseAddress ?? null},
+                    updated_at = NOW()
+                WHERE id = ${dogId};
+            `;
+
+            successItems.push({ index: i, dogId });
+        } catch (error: any) {
+            failedItems.push({ index: i, dogId, reason: error?.message || "Database error" });
+        }
+    }
+
+    res.status(failedItems.length ? 207 : 200).json({
+        success: failedItems.length === 0,
+        message: failedItems.length ? "Release processed with partial failures" : "Release processed successfully",
+        data: {
+            summary: {
+                total: items.length,
+                successCount: successItems.length,
+                failedCount: failedItems.length,
+            },
+            successItems,
+            failedItems,
+        },
+    });
+}
+
+export const getDogDetailsByQrCode = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const payload = (req.body && typeof req.body === "object") ? req.body : {};
+        const qrInputRaw = String(
+            (payload as any).qrCode
+            || (payload as any).qrPayload
+            || req.query.qrCode
+            || req.query.qrPayload
+            || ""
+        ).trim();
+
+        if (!qrInputRaw) {
+            res.status(422).json({
+                success: false,
+                message: "Validation failed",
+                data: { qrCode: ["qrCode or qrPayload is required"] },
+            });
+            return;
+        }
+
+        const normalizedInput = qrInputRaw.toUpperCase();
+        const compactFromInput = normalizedInput
+            .replace(/.*\/T\//i, "")
+            .replace(/-/g, "")
+            .trim();
+
+        const tag = await prisma.tag.findFirst({
+            where: {
+                OR: [
+                    { code: normalizedInput },
+                    { codeCompact: compactFromInput },
+                    { qrPayload: qrInputRaw },
+                ],
+            },
+            select: {
+                id: true,
+                code: true,
+                codeCompact: true,
+                qrPayload: true,
+                assignedDog: true,
+                isAssigned: true,
+                assignedAt: true,
+                batch: {
+                    select: {
+                        id: true,
+                        prefix: true,
+                    },
+                },
+            },
+        });
+
+        const dogWhere: any = {
+            status: { not: STATUS_DELETED },
+        };
+
+        if (tag?.assignedDog) {
+            dogWhere.id = tag.assignedDog;
+        } else {
+            dogWhere.OR = [
+                { qrCode: qrInputRaw },
+                { qrCode: normalizedInput },
+                { qrCode: compactFromInput },
+                ...(tag?.code ? [{ qrCode: tag.code }] : []),
+                ...(tag?.codeCompact ? [{ qrCode: tag.codeCompact }] : []),
+            ];
+        }
+
+        const dog = await prisma.dog.findFirst({
+            where: dogWhere,
+            include: {
+                photos: { orderBy: { capturedAt: "desc" } },
+                shelter: {
+                    select: {
+                        id: true,
+                        name: true,
+                        code: true,
+                    },
+                },
+            },
+        });
+
+        if (!dog) {
+            res.status(404).json({
+                success: false,
+                message: "Dog not found for provided QR",
+                data: [],
+            });
+            return;
+        }
+
+        const geoRows = await prisma.$queryRaw<Array<{ latitude: number | null; longitude: number | null }>>(
+            Prisma.sql`
+                SELECT
+                    ST_Y(rescue_location::geometry) AS latitude,
+                    ST_X(rescue_location::geometry) AS longitude
+                FROM dogs
+                WHERE id = ${dog.id}
+                LIMIT 1
+            `
+        );
+        const geo = geoRows[0]
+            ? {
+                latitude: geoRows[0].latitude !== null ? Number(geoRows[0].latitude) : null,
+                longitude: geoRows[0].longitude !== null ? Number(geoRows[0].longitude) : null,
+            }
+            : null;
+
+        res.status(200).json({
+            success: true,
+            message: "Dog details fetched successfully",
+            data: [{
+                id: dog.id,
+                tempId: dog.tempId,
+                qrCode: dog.qrCode,
+                rfidTag: dog.rfidTag,
+                shelterId: dog.shelterId,
+                shelter: dog.shelter,
+                profileStatus: dog.profileStatus,
+                lifecycleState: dog.lifecycleState,
+                lifecyclePhase: dog.lifecyclePhase,
+                estimatedAge: dog.estimatedAge,
+                sex: dog.sex,
+                breed: dog.breed,
+                color: dog.color,
+                distinguishingMarks: dog.distinguishingMarks,
+                intakeCondition: dog.intakeCondition,
+                behavioralNotes: dog.behavioralNotes,
+                rescueLocation: geo,
+                rescueAddress: dog.rescueAddress,
+                intakeDate: dog.intakeDate,
+                intakeByUserId: dog.intakeByUserId,
+                isSterilized: dog.isSterilized,
+                qrAssignedAt: dog.qrAssignedAt,
+                status: dog.status,
+                createdAt: dog.createdAt,
+                updatedAt: dog.updatedAt,
+                latestPhoto: dog.photos?.[0]
+                    ? { ...dog.photos[0], photoUrl: withEnvPhotoBaseUrl(dog.photos[0].photoUrl) }
+                    : null,
+                photos: (dog.photos || []).map((p: any) => ({
+                    ...p,
+                    photoUrl: withEnvPhotoBaseUrl(p.photoUrl),
+                })),
+                tag: tag
+                    ? {
+                        id: tag.id,
+                        code: tag.code,
+                        codeCompact: tag.codeCompact,
+                        qrPayload: tag.qrPayload,
+                        isAssigned: tag.isAssigned,
+                        assignedAt: tag.assignedAt,
+                        batch: tag.batch,
+                    }
+                    : null,
+            }],
+        });
+    } catch (error: any) {
+        res.status(500).json({
+            success: false,
+            message: error?.message || "Failed to fetch dog details by QR",
+            data: [],
+        });
+    }
+}
+
+export const getWorkflowCounts = async (req: Request, res: Response): Promise<void> => {
+    try {
+        // const shelterId = parseOptionalInt(req.query.shelterId);
+        const startOfDay = new Date();
+        startOfDay.setHours(0, 0, 0, 0);
+        const endOfDay = new Date(startOfDay);
+        endOfDay.setDate(endOfDay.getDate() + 1);
+
+        const baseWhere: any = {
+            status: { not: STATUS_DELETED },
+            // ...(shelterId !== null ? { shelterId } : {}),
+            updatedAt: {
+                gte: startOfDay,
+                lt: endOfDay,
+            },
+        };
+
+        const [shelterTransfer, scheduledReleases, dogsReleased] = await Promise.all([
+            prisma.dog.count({
+                where: {
+                    ...baseWhere,
+                    lifecycleState: "AWAITING_IDENTIFICATION",
+                },
+            }),
+            prisma.dog.count({
+                where: {
+                    ...baseWhere,
+                    lifecycleState: "READY_FOR_RELEASE",
+                },
+            }),
+            prisma.dog.count({
+                where: {
+                    ...baseWhere,
+                    lifecycleState: "RELEASED",
+                },
+            }),
+        ]);
+
+        res.status(200).json({
+            success: true,
+            message: "Workflow counts fetched",
+            data: {
+                date: startOfDay.toISOString().slice(0, 10),
+                shelterTransfer,
+                scheduledReleases,
+                dogsReleased,
+            },
+        });
+    } catch (error: any) {
+        res.status(500).json({
+            success: false,
+            message: error?.message || "Failed to fetch workflow counts",
+            data: {},
+        });
+    }
+}
+
 
 
 
