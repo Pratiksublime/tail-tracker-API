@@ -342,3 +342,29 @@ export const getProfile = async (req: CustomRequest, res: Response): Promise<voi
         });
     }
 };
+
+export const versionValidation = async (req: Request, res: Response): Promise<void> => {
+    const { version } = req.body;
+
+    if (version < Number(process.env.REQUIRED_MOBILE_APP_VERSION)) {
+        res.status(200).send({
+            success: true,
+            message: "Please update your app to continue",
+            data: { requiredVersion: 2 }, // force update
+        })
+        return
+    } else if (version < Number(process.env.CURRENT_VERSION)) {
+        res.status(200).send({
+            success: true,
+            message: "New version of the app is available",
+            data: { requiredVersion: 1 }, //optional update
+        })
+        return
+    }
+
+    res.status(200).send({
+        success: true,
+        message: "App is up to date",
+        data: { requiredVersion: 0 },
+    })
+}

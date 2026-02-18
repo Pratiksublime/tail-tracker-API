@@ -17,8 +17,8 @@ import "./lib/redis";
 dotenv.config();
 
 // Route Imports
-import adminIntakeRoutes from "./module/Admin/Intake/routes";
 import adminComplaintRoutes from "./module/Admin/Complaint/routes";
+import adminIntakeRoutes from "./module/Admin/Intake/routes";
 import adminOrganizations from "./module/Admin/Organizations/routes";
 import adminQrGenerator from "./module/Admin/QrGenerator/routes";
 import adminShelters from "./module/Admin/Shelters/routes";
@@ -31,7 +31,7 @@ const app = express();
 
 // 1. Basic Middleware & Security
 app.use(logger("dev"));
-app.use(cors({ exposedHeaders: ["Content-Disposition"] }));
+app.use(cors());
 app.use(cookieParser());
 
 // 2. File Upload (must run before body parsers for multipart/form-data)

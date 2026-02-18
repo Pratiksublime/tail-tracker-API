@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { execFile } from "child_process";
 import { Request, Response } from "express";
 import fs from "fs";
 import fsp from "fs/promises";
@@ -14,7 +15,6 @@ const STATUS_ACTIVE = Number(process.env.STATUS_ACTIVE) || 1;
 const STATUS_DELETED = Number(process.env.STATUS_DELETED) || 0;
 
 const COMPANY_WEBSITE_URL = process.env.COMPANY_WEBSITE_URL || "https://yourcompany.com";
-const QR_TAG_BASE_URL = process.env.QR_TAG_BASE_URL || `${COMPANY_WEBSITE_URL.replace(/\/$/, "")}/t/`;
 
 const LOGO_PATH =
   process.env.QR_LOGO_PATH
@@ -37,8 +37,32 @@ const MAX_QR_PER_PDF = 100;
 const QR_BRAND_COLOR = "#235D61";
 const QR_RENDER_CONCURRENCY = Math.max(1, Number(process.env.QR_RENDER_CONCURRENCY || 4));
 
+function createZipFromFiles(zipPath: string, files: string[], workingDir: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (process.platform === "win32") {
+      const pathsArg = files.map((f) => `'${f.replace(/'/g, "''")}'`).join(", ");
+      const command = `Compress-Archive -Path ${pathsArg} -DestinationPath '${zipPath.replace(/'/g, "''")}' -Force`;
+      execFile(
+        "powershell.exe",
+        ["-NoProfile", "-Command", command],
+        { cwd: workingDir },
+        (error) => (error ? reject(error) : resolve())
+      );
+      return;
+    }
+
+    // Linux/macOS fallback: requires `zip` binary to be present.
+    execFile(
+      "zip",
+      ["-j", "-q", zipPath, ...files],
+      { cwd: workingDir },
+      (error) => (error ? reject(error) : resolve())
+    );
+  });
+}
+
 function createTagGenerator(baseUrl?: string): TagCodeGenerator {
-  return new TagCodeGenerator({ baseUrl: baseUrl || QR_TAG_BASE_URL });
+  return new TagCodeGenerator({ baseUrl: baseUrl });
 }
 
 function splitPrefix(prefix: string) {
@@ -232,7 +256,7 @@ async function getRightLogoForPanel(targetW: number, targetH: number): Promise<{
   }
 }
 
-async function buildSnapStyleCardPng(qrPayload: string, codeText: string): Promise<Buffer> {
+async function buildSnapStyleCardPng(qrPayload: string, codeText: string, linkText?: string): Promise<Buffer> {
   const cardWidth = 1200;
   const cardHeight = 560;
 
@@ -259,7 +283,7 @@ async function buildSnapStyleCardPng(qrPayload: string, codeText: string): Promi
   const rightPanelH = cardHeight - rightPanelY - 28;
 
   // Website link text under logo
-  const rightLinkText = COMPANY_WEBSITE_URL.replace(/\/$/, "");
+  const rightLinkText = String(linkText || COMPANY_WEBSITE_URL).replace(/\/$/, "");
   const safeRightLink = rightLinkText.replace(/[<>&]/g, "");
   const rightLinkX = rightPanelX + Math.floor(rightPanelW / 2);
 
@@ -330,9 +354,6 @@ async function buildSnapStyleCardPng(qrPayload: string, codeText: string): Promi
     .png()
     .toBuffer();
 }
-
-
-
 
 async function writeCardsToPdf(cards: Buffer[], outputPath: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
@@ -512,6 +533,7 @@ export const generateBulkTagPdf = async (req: Request, res: Response) => {
       notes,
       baseUrl,
       persistBatch = true,
+      download = false,
     } = req.body || {};
 
     const parsedQty = Number(quantity);
@@ -606,7 +628,7 @@ export const generateBulkTagPdf = async (req: Request, res: Response) => {
       const cards = await mapWithConcurrency(
         chunk,
         QR_RENDER_CONCURRENCY,
-        async (tag) => buildSnapStyleCardPng(tag.qrPayload, tag.code)
+        async (tag) => buildSnapStyleCardPng(tag.qrPayload, tag.code, baseUrl)
       );
 
       const fileName = `${batch.batch.prefix}_part_${String(i + 1).padStart(3, "0")}_of_${String(totalPdfs).padStart(3, "0")}.pdf`;
@@ -618,6 +640,28 @@ export const generateBulkTagPdf = async (req: Request, res: Response) => {
         url: `${COMPANY_WEBSITE_URL.replace(/\/$/, "")}/qr-pdfs/${fileName}`,
         count: chunk.length,
       });
+    }
+
+    // Optional direct download response for frontend (single PDF or ZIP for multiple PDFs)
+    if (download) {
+      if (files.length === 1) {
+        const single = files[0];
+        const downloadPath = path.join(outputDir, single.fileName);
+        return res.download(downloadPath, single.fileName);
+      }
+
+      const zipName = `${batch.batch.prefix}_all_parts_${new Date().getTime()}.zip`;
+      const zipPath = path.join(outputDir, zipName);
+      const absolutePdfPaths = files.map((f) => path.join(outputDir, f.fileName));
+      await createZipFromFiles(zipPath, absolutePdfPaths, outputDir);
+      res.download(zipPath, zipName, async () => {
+        try {
+          await fsp.unlink(zipPath);
+        } catch {
+          // no-op: cleanup best effort
+        }
+      });
+      return;
     }
 
     return res.status(200).json({
@@ -660,38 +704,6 @@ export const fetchTag = async (req: Request, res: Response) => {
 
     const where: Prisma.TagWhereInput = {};
 
-    // if (codeCompact) {
-    //   const parsed = createTagGenerator().parseCode(codeCompact);
-    //   if (!parsed.isValid || !parsed.codeCompact) {
-    //     return res.status(400).json({
-    //       success: false,
-    //       message: parsed.error || "Invalid codeCompact",
-    //     });
-    //   }
-    //   where.codeCompact = parsed.codeCompact;
-    // } else if (prefix) {
-    //   if (!/^\d{2}[A-L]\d{2}$/.test(prefix)) {
-    //     return res.status(400).json({
-    //       success: false,
-    //       message: "Invalid prefix format. Expected YYMNN (example: 26B03).",
-    //     });
-    //   }
-
-    //   const batch = await prisma.tagBatch.findUnique({
-    //     where: { prefix },
-    //     select: { id: true },
-    //   });
-
-    //   if (!batch) {
-    //     return res.status(404).json({
-    //       success: false,
-    //       message: "Tag batch not found",
-    //       data: [],
-    //     });
-    //   }
-    //   where.batchId = batch.id;
-    // }
-
     const [total, tags] = await Promise.all([
       prisma.tag.count({ where }),
       prisma.tag.findMany({
@@ -700,7 +712,7 @@ export const fetchTag = async (req: Request, res: Response) => {
         skip,
         take: limit,
         select: {
-          id: true,
+          sequence: true,
           code: true,
           codeCompact: true,
           qrPayload: true,
@@ -710,7 +722,7 @@ export const fetchTag = async (req: Request, res: Response) => {
 
     const imageBase = `${req.protocol}://${req.get("host")}${req.baseUrl}`;
     const data = tags.map((tag) => ({
-      sequence: tag.id,
+      sequence: tag.sequence,
       code: tag.code,
       codeCompact: tag.codeCompact,
       qrPayload: tag.qrPayload,
