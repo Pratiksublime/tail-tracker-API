@@ -1,7 +1,7 @@
 import { randomInt } from "crypto";
 
-export const SAFE_CHARS = "A2C3D4E6F7G9HJKMNPQRTUVWXYZ";
-export const BASE = SAFE_CHARS.length; // 27
+export const SAFE_CHARS = "0123456789";
+export const BASE = SAFE_CHARS.length; // 10
 
 export const PRIME_POOL = [
   547_979, 611_953, 648_391, 700_001, 736_487,
@@ -12,8 +12,7 @@ export const PRIME_POOL = [
 
 export const MONTH_MAP = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"] as const;
 
-const PART2_OFFSET = 300_000;
-const CODE_SPACE = Math.pow(BASE, 4);
+const CODE_SPACE = Math.pow(BASE, 8);
 
 export interface TagCodeGeneratorConfig {
   baseUrl?: string;
@@ -74,7 +73,7 @@ function scramble(sequenceNum: number, seed: number, prime: number): string {
   if (scrambled < 0) scrambled += CODE_SPACE;
 
   let code = "";
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 8; i++) {
     code = SAFE_CHARS[scrambled % BASE] + code;
     scrambled = Math.floor(scrambled / BASE);
   }
@@ -122,8 +121,9 @@ export class TagCodeGenerator {
       throw new Error("Sequence number must be >= 1");
     }
 
-    const part1 = scramble(sequenceNum, seed, prime);
-    const part2 = scramble(sequenceNum + PART2_OFFSET, seed, prime);
+    const numericSafe = scramble(sequenceNum, seed, prime);
+    const part1 = numericSafe.slice(0, 4);
+    const part2 = numericSafe.slice(4, 8);
 
     const code = `${prefix}-${part1}-${part2}`;
     const codeCompact = `${prefix}${part1}${part2}`;
@@ -217,11 +217,11 @@ export class TagCodeGenerator {
       };
     }
 
-    const safeRegex = new RegExp(`^[${SAFE_CHARS}]{4}$`);
+    const safeRegex = /^[0-9]{4}$/;
     if (!safeRegex.test(part1) || !safeRegex.test(part2)) {
       return {
         isValid: false,
-        error: `Code contains invalid characters. Only these are allowed: ${SAFE_CHARS}`,
+        error: "Code contains invalid characters. Only digits (0-9) are allowed.",
         raw: input,
       };
     }

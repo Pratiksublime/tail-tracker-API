@@ -7,7 +7,6 @@ import path from "path";
 import PDFDocument from "pdfkit";
 import QRCode from "qrcode";
 import sharp from "sharp";
-import { v4 as uuidv4 } from "uuid";
 import { prisma } from "../../../lib/prisma";
 import { MONTH_MAP, TagCodeGenerator } from "./tagCodeGenerator";
 
@@ -36,6 +35,38 @@ const DEFAULT_LOGO_SIZE = 80;
 const MAX_QR_PER_PDF = 100;
 const QR_BRAND_COLOR = "#235D61";
 const QR_RENDER_CONCURRENCY = Math.max(1, Number(process.env.QR_RENDER_CONCURRENCY || 4));
+const PDF_PAGE_MARGIN = 20;
+const PDF_GRID_GAP = 10;
+const PDF_GRID_COLS = 2;
+const PDF_GRID_ROWS = 2;
+const A4_LANDSCAPE_WIDTH_PT = 841.89;
+
+// function cmToPt(cm: number): number {
+//   return (cm / 2.54) * 72;
+// }
+
+function cmToPt(cm: number) {
+  return (cm / 2.54) * 72;
+}
+function inToPt(inches: number) {
+  return inches * 72;
+}
+
+function qrPxForPrintedSize(
+  desiredQrPt: number,
+  printedCardPt: number,
+  cardHeightPx: number
+) {
+  return Math.round((desiredQrPt / printedCardPt) * cardHeightPx);
+}
+
+function getQrRenderPxForTargetPrintedHeight(targetCm: number, cardWidthPx: number): number {
+  const cardWidthPt =
+    (A4_LANDSCAPE_WIDTH_PT - PDF_PAGE_MARGIN * 2 - PDF_GRID_GAP * (PDF_GRID_COLS - 1)) / PDF_GRID_COLS;
+  const scaleToPdf = cardWidthPt / cardWidthPx;
+  const targetPt = cmToPt(targetCm);
+  return Math.max(1, Math.round(targetPt / scaleToPdf));
+}
 
 function createZipFromFiles(zipPath: string, files: string[], workingDir: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -256,66 +287,110 @@ async function getRightLogoForPanel(targetW: number, targetH: number): Promise<{
   }
 }
 
-async function buildSnapStyleCardPng(qrPayload: string, codeText: string, linkText?: string): Promise<Buffer> {
-  const cardWidth = 1200;
+
+export async function buildSnapStyleCardPng(
+  qrPayload: string,
+  codeText: string,
+  linkText?: string
+): Promise<Buffer> {
+  const cardWidth = 1200;   // if you still want wider, set 1350 etc.
   const cardHeight = 560;
+
+  // Must match writeCardsToPdf() scaling:
+  const printedCardPt = cmToPt(2.5); // card prints 2.5cm tall
+
+  // QR printed target (pick one)
+  const desiredQrPt = cmToPt(2.0);
+  // const desiredQrPt = inToPt(1.0);
 
   const brandColor = "#235D61";
   const cardBg = "#efefef";
 
-  // Left QR frame
+  // QR frame geometry
   const frameX = 60;
-  const frameY = 45;
   const frameSize = 420;
   const frameStroke = 12;
 
-  const qrSize = 380;
-  const qrX = frameX + Math.floor((frameSize - qrSize) / 2);
-  const qrY = frameY + Math.floor((frameSize - qrSize) / 2);
+  // ✅ Center the QR frame vertically (equal top & bottom)
+  const frameY = Math.floor((cardHeight - frameSize) / 2);
 
-  const codeX = frameX + Math.floor(frameSize / 2);
-  const codeY = frameY + frameSize + 52;
+  const safeCodeDigits = String(codeText).replace(/[<>&]/g, "").replace(/\D/g, "");
+  const safeCode = safeCodeDigits.slice(-8).padStart(8, "0");
 
-  // Right panel geometry (logo auto-fits here)
-  const rightPanelX = 520;
+  // ✅ Reserve "safe code gutter" between QR and logo to prevent overlap
+  const safeGutterW = 115;  // more = more breathing room
+  const qrToLogoGap = 28;   // spacing after gutter before logo area starts
+
+  // ✅ Right panel starts AFTER the QR + gutter (prevents overlap)
+  const rightPanelX = frameX + frameSize + safeGutterW + qrToLogoGap;
   const rightPanelY = 28;
   const rightPanelW = cardWidth - rightPanelX - 28;
   const rightPanelH = cardHeight - rightPanelY - 28;
+
+  // ✅ Safe code placed in the center of that gutter
+  const sideCodeFontSize = 44;
+  const sideCodeY = frameY + Math.floor(frameSize / 2);
+
+  // Put code in the middle of the gutter (slightly biased toward QR if desired)
+  const rightCodeX = frameX + frameSize + Math.floor(safeGutterW / 2);
+
+  // Direction:
+  //  90  -> reads top-to-bottom
+  // -90  -> reads bottom-to-top
+  const rightRotate = 90;
+
+  // ✅ Increase QR size inside frame by reducing padding
+  let qrRenderSize = qrPxForPrintedSize(desiredQrPt, printedCardPt, cardHeight);
+
+  const framePadding = 10; // smaller padding => bigger QR (try 8..16)
+  const maxInsideFrame = frameSize - framePadding;
+  qrRenderSize = Math.min(qrRenderSize, maxInsideFrame);
+
+  // ✅ QR centered inside frame
+  const qrX = frameX + Math.floor((frameSize - qrRenderSize) / 2);
+  const qrY = frameY + Math.floor((frameSize - qrRenderSize) / 2);
+
+  // Build QR PNG (ensure your buildBrandedQrPng uses nearest-neighbor if it resizes)
+  const qrPng = await buildBrandedQrPng(qrPayload, qrRenderSize, 2, 112, 72);
 
   // Website link text under logo
   const rightLinkText = String(linkText || COMPANY_WEBSITE_URL).replace(/\/$/, "");
   const safeRightLink = rightLinkText.replace(/[<>&]/g, "");
   const rightLinkX = rightPanelX + Math.floor(rightPanelW / 2);
 
-  const safeCode = String(codeText).replace(/[<>&]/g, "");
-
+  // Base SVG: background, right-side safe code, QR frame
   const baseSvg = `
     <svg width="${cardWidth}" height="${cardHeight}" xmlns="http://www.w3.org/2000/svg">
       <rect width="${cardWidth}" height="${cardHeight}" fill="${cardBg}" />
+
+      <!-- Right rotated safe code (in reserved gutter) -->
+      <text
+        x="${rightCodeX}" y="${sideCodeY}"
+        text-anchor="middle"
+        dominant-baseline="middle"
+        fill="${brandColor}"
+        font-size="${sideCodeFontSize}"
+        font-family="Arial, sans-serif"
+        font-weight="800"
+        letter-spacing="2"
+        transform="rotate(${rightRotate} ${rightCodeX} ${sideCodeY})"
+      >${safeCode}</text>
 
       <!-- QR frame -->
       <rect
         x="${frameX}" y="${frameY}" width="${frameSize}" height="${frameSize}"
         fill="#FFFFFF" stroke="${brandColor}" stroke-width="${frameStroke}"
       />
-
-      <!-- Code under QR -->
-      <text
-        x="${codeX}" y="${codeY}" text-anchor="middle"
-        fill="${brandColor}" font-size="42" font-family="Arial, sans-serif"
-        font-weight="800" letter-spacing="2"
-      >${safeCode}</text>
-
     </svg>
   `;
 
-  const qrPng = await buildBrandedQrPng(qrPayload, qrSize, 2, 112, 72);
-
+  // --- Right logo layout ---
   let logoBuffer: Buffer | null = null;
   let logoLeft = rightPanelX;
   let logoTop = rightPanelY;
   let logoW = rightPanelW;
   let logoH = Math.floor(rightPanelH * 0.78);
+
   const linkFontSize = 30;
   const sectionGap = 20;
 
@@ -332,6 +407,7 @@ async function buildSnapStyleCardPng(qrPayload: string, codeText: string, linkTe
   logoTop = rightContentTop;
 
   const linkY = Math.min(cardHeight - 16, rightContentTop + logoH + sectionGap + linkFontSize - 4);
+
   const overlaySvg = `
     <svg width="${cardWidth}" height="${cardHeight}" xmlns="http://www.w3.org/2000/svg">
       <text
@@ -349,68 +425,81 @@ async function buildSnapStyleCardPng(qrPayload: string, codeText: string, linkTe
   ];
   if (logoBuffer) composites.push({ input: logoBuffer, top: logoTop, left: logoLeft });
 
-  return sharp(Buffer.from(baseSvg))
-    .composite(composites)
-    .png()
-    .toBuffer();
+  return sharp(Buffer.from(baseSvg)).composite(composites).png().toBuffer();
 }
 
-async function writeCardsToPdf(cards: Buffer[], outputPath: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", layout: "landscape", margin: 20 });
-    const stream = fs.createWriteStream(outputPath);
-    doc.pipe(stream);
+// -----------------------------------------------------------------------------
+// PDF WRITER (unchanged except shown fully)
+// Ensures card printed height is 2.5cm; width auto by aspect ratio.
+// -----------------------------------------------------------------------------
+export async function writeCardsToPdf(cards: Buffer[], outputPath: string): Promise<void> {
+  await new Promise<void>(async (resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: "A4", layout: "landscape", margin: PDF_PAGE_MARGIN });
+      const stream = fs.createWriteStream(outputPath);
+      doc.pipe(stream);
 
-    const cols = 2;
-    const rows = 2;
-    const gap = 10;
-    const margin = 20;
-    const pageW = doc.page.width;
-    const pageH = doc.page.height;
-    const cardW = (pageW - margin * 2 - gap * (cols - 1)) / cols;
-    const cardH = (pageH - margin * 2 - gap * (rows - 1)) / rows;
-    const cardsPerPage = cols * rows;
+      const margin = PDF_PAGE_MARGIN;
+      const gap = PDF_GRID_GAP;
 
-    cards.forEach((card, idx) => {
-      if (idx > 0 && idx % cardsPerPage === 0) {
-        doc.addPage({ size: "A4", layout: "landscape", margin: 20 });
+      const pageW = doc.page.width;
+      const pageH = doc.page.height;
+
+      // ✅ fixed printed height (2.5 cm)
+      const targetH = cmToPt(2.5);
+
+      const meta = await sharp(cards[0]).metadata();
+      if (!meta.width || !meta.height) throw new Error("Unable to read card image dimensions");
+      const aspect = meta.width / meta.height;
+
+      // ✅ auto width from aspect ratio
+      const targetW = targetH * aspect;
+
+      let x = margin;
+      let y = margin;
+
+      const maxX = pageW - margin;
+      const maxY = pageH - margin;
+
+      for (let i = 0; i < cards.length; i++) {
+        // wrap to next row
+        if (x + targetW > maxX) {
+          x = margin;
+          y += targetH + gap;
+        }
+
+        // new page if needed
+        if (y + targetH > maxY) {
+          doc.addPage({ size: "A4", layout: "landscape", margin: PDF_PAGE_MARGIN });
+          x = margin;
+          y = margin;
+        }
+
+        // ✅ print at fixed height; width follows aspect ratio
+        doc.image(cards[i], x, y, { height: targetH });
+
+        x += targetW + gap;
       }
 
-      const slot = idx % cardsPerPage;
-      const r = Math.floor(slot / cols);
-      const c = slot % cols;
-      const x = margin + c * (cardW + gap);
-      const y = margin + r * (cardH + gap);
-      doc.image(card, x, y, { fit: [cardW, cardH], align: "center", valign: "center" });
-    });
-
-    doc.end();
-    stream.on("finish", () => resolve());
-    stream.on("error", reject);
+      doc.end();
+      stream.on("finish", () => resolve());
+      stream.on("error", reject);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
-export const generateQrCode = async (req: Request, res: Response) => {
-  try {
-    const token = uuidv4();
-    const qrUrl = `${COMPANY_WEBSITE_URL.replace(/\/$/, "")}/scan/${encodeURIComponent(token)}`;
 
-    const finalPng = await buildBrandedQrPng(qrUrl);
 
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader("Cache-Control", "no-store");
-    res.setHeader("X-QR-URL", qrUrl);
-    res.setHeader("X-QR-TOKEN", token);
-
-    return res.status(200).send(finalPng);
-  } catch (e: any) {
-    console.error(e);
-    return res.status(500).json({
-      message: "Failed to generate QR",
-      error: e?.message,
-    });
+async function getPngSize(card: Buffer): Promise<{ w: number; h: number }> {
+  const meta = await sharp(card).metadata();
+  if (!meta.width || !meta.height) {
+    throw new Error("Unable to read image dimensions");
   }
-};
+  return { w: meta.width, h: meta.height };
+}
+
 
 export const createTagBatch = async (req: Request, res: Response) => {
   try {
@@ -644,7 +733,7 @@ export const generateBulkTagPdf = async (req: Request, res: Response) => {
 
     // Optional direct download response for frontend (single PDF or ZIP for multiple PDFs)
     if (download) {
-      if (files.length === 1) {
+      if (parsedQty <= perPdf) {
         const single = files[0];
         const downloadPath = path.join(outputDir, single.fileName);
         return res.download(downloadPath, single.fileName);
