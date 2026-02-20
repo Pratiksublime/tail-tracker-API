@@ -301,9 +301,9 @@ model Otp {
 
 model TagBatch {
   id              Int      @id @default(autoincrement())
-  prefix          String   @unique @db.VarChar(5)
-  yearMonth       String   @map("year_month") @db.VarChar(3)
-  sequence        Int
+  prefix          String?  @db.VarChar(5)
+  yearMonth       String?  @map("year_month") @db.VarChar(3)
+  sequence        Int?
   quantity        Int
   batchSeed       Int      @map("batch_seed")
   primeMultiplier Int      @map("prime_multiplier")

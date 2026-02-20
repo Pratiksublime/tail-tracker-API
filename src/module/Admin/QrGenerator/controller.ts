@@ -96,16 +96,21 @@ function createTagGenerator(baseUrl?: string): TagCodeGenerator {
   return new TagCodeGenerator({ baseUrl: baseUrl });
 }
 
-function splitPrefix(prefix: string) {
-  const match = /^(\d{2}[A-L])(\d{2})$/.exec(prefix);
-  if (!match) {
-    throw new Error("Invalid prefix format. Expected YYMNN (example: 26B03).");
-  }
+async function resolveAutoBatchPrefix(generator: TagCodeGenerator): Promise<{ prefix: string; yearMonth: string; sequence: number }> {
+  const now = new Date();
+  const year = now.getFullYear().toString().slice(-2);
+  const yearMonth = `${year}${MONTH_MAP[now.getMonth()]}`;
 
-  return {
-    yearMonth: match[1],
-    sequence: Number(match[2]),
-  };
+  const lastBatch = await prisma.tagBatch.findFirst({
+    where: { yearMonth },
+    orderBy: { sequence: "desc" },
+    select: { sequence: true },
+  });
+
+  const sequence = (lastBatch?.sequence || 0) + 1;
+  const prefix = generator.generatePrefix(sequence, now);
+
+  return { prefix, yearMonth, sequence };
 }
 
 type CenterQrAssets = { logo: Buffer; knockout: Buffer };
@@ -195,54 +200,22 @@ async function buildBrandedQrPng(
   logoSize = DEFAULT_LOGO_SIZE,
   innerLogoSize = logoSize
 ) {
-  const qrObj = QRCode.create(qrText, { errorCorrectionLevel: "H" });
-  const moduleCount = qrObj.modules.size;
-  const quiet = Math.max(2, margin);
-  const totalModules = moduleCount + quiet * 2;
-  const moduleSize = width / totalModules;
-  const dotRadius = moduleSize * 0.36;
-
-  const finderAt = [
-    { row: 0, col: 0 },
-    { row: 0, col: moduleCount - 7 },
-    { row: moduleCount - 7, col: 0 },
-  ];
-
-  const inFinder = (r: number, c: number) =>
-    finderAt.some((f) => r >= f.row && r < f.row + 7 && c >= f.col && c < f.col + 7);
-
-  const getDark = (r: number, c: number) => qrObj.modules.get(r, c);
-
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${width}" viewBox="0 0 ${width} ${width}">`;
-  svg += `<rect width="${width}" height="${width}" fill="#FFFFFF"/>`;
-
-  for (let r = 0; r < moduleCount; r++) {
-    for (let c = 0; c < moduleCount; c++) {
-      if (!getDark(r, c) || inFinder(r, c)) continue;
-      const cx = (quiet + c + 0.5) * moduleSize;
-      const cy = (quiet + r + 0.5) * moduleSize;
-      svg += `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${dotRadius.toFixed(2)}" fill="${QR_BRAND_COLOR}"/>`;
-    }
-  }
-
-  finderAt.forEach(({ row, col }) => {
-    const x = (quiet + col) * moduleSize;
-    const y = (quiet + row) * moduleSize;
-    const s = 7 * moduleSize;
-    const outerRadius = moduleSize * 0.8;
-    const innerOffset = 2 * moduleSize;
-    const innerSize = 3 * moduleSize;
-    const innerRadius = moduleSize * 0.5;
-    const ringStroke = moduleSize * 0.85;
-
-    svg += `<rect x="${(x + moduleSize * 0.45).toFixed(2)}" y="${(y + moduleSize * 0.45).toFixed(2)}" width="${(s - moduleSize * 0.9).toFixed(2)}" height="${(s - moduleSize * 0.9).toFixed(2)}" rx="${outerRadius.toFixed(2)}" fill="none" stroke="${QR_BRAND_COLOR}" stroke-width="${ringStroke.toFixed(2)}"/>`;
-    svg += `<rect x="${(x + innerOffset).toFixed(2)}" y="${(y + innerOffset).toFixed(2)}" width="${innerSize.toFixed(2)}" height="${innerSize.toFixed(2)}" rx="${innerRadius.toFixed(2)}" fill="${QR_BRAND_COLOR}"/>`;
+  // Use the library rasterizer to preserve all required QR patterns exactly.
+  const qrPng = await QRCode.toBuffer(qrText, {
+    type: "png",
+    errorCorrectionLevel: "H",
+    width,
+    margin: Math.max(0, margin),
+    color: {
+      dark: QR_BRAND_COLOR,
+      light: "#FFFFFFFF",
+    },
   });
 
-  svg += `</svg>`;
-  const qrPng = await sharp(Buffer.from(svg)).png().toBuffer();
-
-  const { logo, knockout } = await getCenterQrAssets(logoSize, innerLogoSize);
+  // Keep center logo conservative so dense payloads stay scannable.
+  const safeLogoSize = Math.min(logoSize, Math.floor(width * 0.16));
+  const safeInnerLogoSize = Math.min(innerLogoSize, Math.floor(safeLogoSize * 0.62));
+  const { logo, knockout } = await getCenterQrAssets(safeLogoSize, safeInnerLogoSize);
 
   return sharp(qrPng)
     .composite([
@@ -309,7 +282,6 @@ export async function buildSnapStyleCardPng(
   // QR frame geometry
   const frameX = 60;
   const frameSize = 420;
-  const frameStroke = 12;
 
   // ✅ Center the QR frame vertically (equal top & bottom)
   const frameY = Math.floor((cardHeight - frameSize) / 2);
@@ -342,7 +314,7 @@ export async function buildSnapStyleCardPng(
   // ✅ Increase QR size inside frame by reducing padding
   let qrRenderSize = qrPxForPrintedSize(desiredQrPt, printedCardPt, cardHeight);
 
-  const framePadding = 10; // smaller padding => bigger QR (try 8..16)
+  const framePadding = 0; // border removed, so use full frame area for QR
   const maxInsideFrame = frameSize - framePadding;
   qrRenderSize = Math.min(qrRenderSize, maxInsideFrame);
 
@@ -351,7 +323,7 @@ export async function buildSnapStyleCardPng(
   const qrY = frameY + Math.floor((frameSize - qrRenderSize) / 2);
 
   // Build QR PNG (ensure your buildBrandedQrPng uses nearest-neighbor if it resizes)
-  const qrPng = await buildBrandedQrPng(qrPayload, qrRenderSize, 2, 112, 72);
+  const qrPng = await buildBrandedQrPng(qrPayload, qrRenderSize, 0, 112, 72);
 
   // Website link text under logo
   const rightLinkText = String(linkText || COMPANY_WEBSITE_URL).replace(/\/$/, "");
@@ -379,7 +351,7 @@ export async function buildSnapStyleCardPng(
       <!-- QR frame -->
       <rect
         x="${frameX}" y="${frameY}" width="${frameSize}" height="${frameSize}"
-        fill="#FFFFFF" stroke="${brandColor}" stroke-width="${frameStroke}"
+        fill="#FFFFFF"
       />
     </svg>
   `;
@@ -505,8 +477,6 @@ export const createTagBatch = async (req: Request, res: Response) => {
   try {
     const {
       quantity,
-      prefix,
-      prefixSequence,
       notes,
       baseUrl,
       includeSecrets = true,
@@ -520,39 +490,15 @@ export const createTagBatch = async (req: Request, res: Response) => {
     }
 
     const generator = createTagGenerator(baseUrl);
-    let resolvedPrefix: string | undefined =
-      typeof prefix === "string" && prefix.trim() ? prefix.trim().toUpperCase() : undefined;
-
-    if (!resolvedPrefix && prefixSequence !== undefined) {
-      resolvedPrefix = generator.generatePrefix(Number(prefixSequence));
-    }
-
-    if (!resolvedPrefix) {
-      const now = new Date();
-      const year = now.getFullYear().toString().slice(-2);
-      const yearMonth = `${year}${MONTH_MAP[now.getMonth()]}`;
-
-      const lastBatch = await prisma.tagBatch.findFirst({
-        where: { yearMonth },
-        orderBy: { sequence: "desc" },
-        select: { sequence: true },
-      });
-
-      resolvedPrefix = generator.generateNextPrefix(lastBatch?.sequence || 0, now);
-    }
-
-    splitPrefix(resolvedPrefix);
+    const { prefix: resolvedPrefix, yearMonth, sequence } = await resolveAutoBatchPrefix(generator);
 
     const batch = generator.createBatch({
       quantity: parsedQty,
       prefix: resolvedPrefix,
-      prefixSequence: prefixSequence !== undefined ? Number(prefixSequence) : undefined,
       notes: typeof notes === "string" ? notes : "",
     });
 
     if (persistBatch) {
-      const { yearMonth, sequence } = splitPrefix(batch.batch.prefix);
-
       await prisma.$transaction(async (tx) => {
         const createdBatch = await tx.tagBatch.create({
           data: {
@@ -606,7 +552,7 @@ export const createTagBatch = async (req: Request, res: Response) => {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
       return res.status(409).json({
         success: false,
-        message: "Batch prefix or tag code already exists. Retry with a new prefix.",
+        message: "Tag code already exists. Retry the request.",
       });
     }
     return res.status(400).json({ success: false, message: e?.message || "Failed to generate tag batch" });
@@ -617,8 +563,6 @@ export const generateBulkTagPdf = async (req: Request, res: Response) => {
   try {
     const {
       quantity,
-      prefix,
-      prefixSequence,
       notes,
       baseUrl,
       persistBatch = true,
@@ -640,36 +584,15 @@ export const generateBulkTagPdf = async (req: Request, res: Response) => {
     }
 
     const generator = createTagGenerator(baseUrl);
-    let resolvedPrefix: string | undefined =
-      typeof prefix === "string" && prefix.trim() ? prefix.trim().toUpperCase() : undefined;
-
-    if (!resolvedPrefix && prefixSequence !== undefined) {
-      resolvedPrefix = generator.generatePrefix(Number(prefixSequence));
-    }
-
-    if (!resolvedPrefix) {
-      const now = new Date();
-      const year = now.getFullYear().toString().slice(-2);
-      const yearMonth = `${year}${MONTH_MAP[now.getMonth()]}`;
-      const lastBatch = await prisma.tagBatch.findFirst({
-        where: { yearMonth },
-        orderBy: { sequence: "desc" },
-        select: { sequence: true },
-      });
-      resolvedPrefix = generator.generateNextPrefix(lastBatch?.sequence || 0, now);
-    }
-
-    splitPrefix(resolvedPrefix);
+    const { prefix: resolvedPrefix, yearMonth, sequence } = await resolveAutoBatchPrefix(generator);
 
     const batch = generator.createBatch({
       quantity: parsedQty,
       prefix: resolvedPrefix,
-      prefixSequence: prefixSequence !== undefined ? Number(prefixSequence) : undefined,
       notes: typeof notes === "string" ? notes : "",
     });
 
     if (persistBatch) {
-      const { yearMonth, sequence } = splitPrefix(batch.batch.prefix);
       await prisma.$transaction(async (tx) => {
         const createdBatch = await tx.tagBatch.create({
           data: {
@@ -705,6 +628,18 @@ export const generateBulkTagPdf = async (req: Request, res: Response) => {
     const outputDir = path.join(process.cwd(), "public", "qr-pdfs");
     await fsp.mkdir(outputDir, { recursive: true });
 
+    if (download) {
+      const cards = await mapWithConcurrency(
+        batch.tags,
+        QR_RENDER_CONCURRENCY,
+        async (tag) => buildSnapStyleCardPng(tag.qrPayload, tag.code, baseUrl)
+      );
+      const fileName = `${batch.batch.prefix}_${Date.now()}.pdf`;
+      const outputPath = path.join(outputDir, fileName);
+      await writeCardsToPdf(cards, outputPath);
+      return res.download(outputPath, fileName);
+    }
+
     const totalTags = batch.tags.length;
     const totalPdfs = Math.ceil(totalTags / perPdf);
     const files: Array<{ fileName: string; url: string; count: number }> = [];
@@ -731,28 +666,6 @@ export const generateBulkTagPdf = async (req: Request, res: Response) => {
       });
     }
 
-    // Optional direct download response for frontend (single PDF or ZIP for multiple PDFs)
-    if (download) {
-      if (parsedQty <= perPdf) {
-        const single = files[0];
-        const downloadPath = path.join(outputDir, single.fileName);
-        return res.download(downloadPath, single.fileName);
-      }
-
-      const zipName = `${batch.batch.prefix}_all_parts_${new Date().getTime()}.zip`;
-      const zipPath = path.join(outputDir, zipName);
-      const absolutePdfPaths = files.map((f) => path.join(outputDir, f.fileName));
-      await createZipFromFiles(zipPath, absolutePdfPaths, outputDir);
-      res.download(zipPath, zipName, async () => {
-        try {
-          await fsp.unlink(zipPath);
-        } catch {
-          // no-op: cleanup best effort
-        }
-      });
-      return;
-    }
-
     return res.status(200).json({
       success: true,
       message: "Bulk QR PDFs generated successfully",
@@ -773,7 +686,7 @@ export const generateBulkTagPdf = async (req: Request, res: Response) => {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
       return res.status(409).json({
         success: false,
-        message: "Batch prefix or tag code already exists. Retry with a new prefix.",
+        message: "Tag code already exists. Retry the request.",
       });
     }
     return res.status(400).json({

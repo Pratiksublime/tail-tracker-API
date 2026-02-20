@@ -8,6 +8,19 @@ import { parseCoordinates, parseOptionalInt } from "../../../utils/parseHelper";
 const STATUS_ACTIVE = Number(process.env.STATUS_ACTIVE);
 const STATUS_DELETED = Number(process.env.STATUS_DELETED);
 const ADMIN_INTAKE_ROLES = new Set(["SHELTER_STAFF", "SHELTER_MANAGER", "NGO_ADMIN", "GOVT_ADMIN", "SUPER_ADMIN"]);
+const PHOTO_BASE_URL = String(
+    process.env.PHOTO_BASE_URL || process.env.COMPANY_WEBSITE_URL || ""
+).replace(/\/$/, "");
+
+const withEnvPhotoBaseUrl = (photoUrl: string | null | undefined) => {
+    if (!photoUrl) return photoUrl || null;
+    if (!PHOTO_BASE_URL) return photoUrl;
+
+    // keep path, swap host/base to env-configured base URL
+    const match = photoUrl.match(/(\/uploads\/dogs\/.+)$/);
+    if (match?.[1]) return `${PHOTO_BASE_URL}${match[1]}`;
+    return photoUrl;
+};
 
 
 // export const workflowList = async (req: Request, res: Response): Promise<void> => {
@@ -1059,4 +1072,169 @@ export const releaseDogs = async (req: Request, res: Response): Promise<void> =>
             failedItems,
         },
     });
+}
+
+export const getDogDetailsByQrCode = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const payload = (req.body && typeof req.body === "object") ? req.body : {};
+        const qrInputRaw = String(
+            (payload as any).qrCode
+            || (payload as any).qrPayload
+            || req.query.qrCode
+            || req.query.qrPayload
+            || ""
+        ).trim();
+
+        if (!qrInputRaw) {
+            res.status(422).json({
+                success: false,
+                message: "Validation failed",
+                data: { qrCode: ["qrCode or qrPayload is required"] },
+            });
+            return;
+        }
+
+        const normalizedInput = qrInputRaw.toUpperCase();
+        const compactFromInput = normalizedInput
+            .replace(/.*\/T\//i, "")
+            .replace(/-/g, "")
+            .trim();
+
+        const tag = await prisma.tag.findFirst({
+            where: {
+                OR: [
+                    { code: normalizedInput },
+                    { codeCompact: compactFromInput },
+                    { qrPayload: qrInputRaw },
+                ],
+            },
+            select: {
+                id: true,
+                code: true,
+                codeCompact: true,
+                qrPayload: true,
+                assignedDog: true,
+                isAssigned: true,
+                assignedAt: true,
+                batch: {
+                    select: {
+                        id: true,
+                        prefix: true,
+                    },
+                },
+            },
+        });
+
+        const dogWhere: any = {
+            status: { not: STATUS_DELETED },
+        };
+
+        if (tag?.assignedDog) {
+            dogWhere.id = tag.assignedDog;
+        } else {
+            dogWhere.OR = [
+                { qrCode: qrInputRaw },
+                { qrCode: normalizedInput },
+                { qrCode: compactFromInput },
+                ...(tag?.code ? [{ qrCode: tag.code }] : []),
+                ...(tag?.codeCompact ? [{ qrCode: tag.codeCompact }] : []),
+            ];
+        }
+
+        const dog = await prisma.dog.findFirst({
+            where: dogWhere,
+            include: {
+                photos: { orderBy: { capturedAt: "desc" } },
+                shelter: {
+                    select: {
+                        id: true,
+                        name: true,
+                        code: true,
+                    },
+                },
+            },
+        });
+
+        if (!dog) {
+            res.status(404).json({
+                success: false,
+                message: "Dog not found for provided QR",
+                data: [],
+            });
+            return;
+        }
+
+        const geoRows = await prisma.$queryRaw<Array<{ latitude: number | null; longitude: number | null }>>(
+            Prisma.sql`
+                SELECT
+                    ST_Y(rescue_location::geometry) AS latitude,
+                    ST_X(rescue_location::geometry) AS longitude
+                FROM dogs
+                WHERE id = ${dog.id}
+                LIMIT 1
+            `
+        );
+        const geo = geoRows[0]
+            ? {
+                latitude: geoRows[0].latitude !== null ? Number(geoRows[0].latitude) : null,
+                longitude: geoRows[0].longitude !== null ? Number(geoRows[0].longitude) : null,
+            }
+            : null;
+
+        res.status(200).json({
+            success: true,
+            message: "Dog details fetched successfully",
+            data: [{
+                id: dog.id,
+                tempId: dog.tempId,
+                qrCode: dog.qrCode,
+                rfidTag: dog.rfidTag,
+                shelterId: dog.shelterId,
+                shelter: dog.shelter,
+                profileStatus: dog.profileStatus,
+                lifecycleState: dog.lifecycleState,
+                lifecyclePhase: dog.lifecyclePhase,
+                estimatedAge: dog.estimatedAge,
+                sex: dog.sex,
+                breed: dog.breed,
+                color: dog.color,
+                distinguishingMarks: dog.distinguishingMarks,
+                intakeCondition: dog.intakeCondition,
+                behavioralNotes: dog.behavioralNotes,
+                rescueLocation: geo,
+                rescueAddress: dog.rescueAddress,
+                intakeDate: dog.intakeDate,
+                intakeByUserId: dog.intakeByUserId,
+                isSterilized: dog.isSterilized,
+                qrAssignedAt: dog.qrAssignedAt,
+                status: dog.status,
+                createdAt: dog.createdAt,
+                updatedAt: dog.updatedAt,
+                latestPhoto: dog.photos?.[0]
+                    ? { ...dog.photos[0], photoUrl: withEnvPhotoBaseUrl(dog.photos[0].photoUrl) }
+                    : null,
+                photos: (dog.photos || []).map((p: any) => ({
+                    ...p,
+                    photoUrl: withEnvPhotoBaseUrl(p.photoUrl),
+                })),
+                tag: tag
+                    ? {
+                        id: tag.id,
+                        code: tag.code,
+                        codeCompact: tag.codeCompact,
+                        qrPayload: tag.qrPayload,
+                        isAssigned: tag.isAssigned,
+                        assignedAt: tag.assignedAt,
+                        batch: tag.batch,
+                    }
+                    : null,
+            }],
+        });
+    } catch (error: any) {
+        res.status(500).json({
+            success: false,
+            message: error?.message || "Failed to fetch dog details by QR",
+            data: [],
+        });
+    }
 }
